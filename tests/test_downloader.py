@@ -19,6 +19,16 @@ class FakeYoutubeDL:
         return False
 
     def extract_info(self, url, download):
+        if self.options.get("extract_flat"):
+            return {
+                "id": "pl123",
+                "title": "Playlist",
+                "entries": [
+                    {"id": "abc123"},
+                    {"webpage_url": "https://www.youtube.com/watch?v=def456"},
+                ],
+            }
+
         if download:
             video_path = self.home / "Sample [abc123]" / "Sample [abc123].mp4"
             video_path.parent.mkdir(parents=True, exist_ok=True)
@@ -60,6 +70,7 @@ def test_build_options_include_resolution_and_subtitles(tmp_path):
         subtitle_languages=("en", "hi"),
         download_subtitles=True,
         embed_subtitles=True,
+        concurrent_fragments=4,
     )
 
     service = DownloadService(ydl_factory=FakeYoutubeDL)
@@ -68,6 +79,7 @@ def test_build_options_include_resolution_and_subtitles(tmp_path):
     assert options["format"] == "bestvideo*[height<=1080]+bestaudio/best[height<=1080]/best"
     assert options["writesubtitles"] is True
     assert options["writeautomaticsub"] is True
+    assert options["concurrent_fragment_downloads"] == 4
     assert options["subtitleslangs"] == ["en", "hi"]
     assert options["postprocessors"][0]["key"] == "FFmpegSubtitlesConvertor"
     assert options["postprocessors"][1]["key"] == "FFmpegEmbedSubtitle"
@@ -95,3 +107,13 @@ def test_list_formats_returns_sorted_entries():
     assert formats[0].format_id == "137"
     assert formats[0].resolution == "1080p"
     assert formats[-1].resolution == "audio only"
+
+
+def test_list_playlist_video_urls_expands_entries():
+    service = DownloadService(ydl_factory=FakeYoutubeDL)
+    urls = service.list_playlist_video_urls("https://www.youtube.com/playlist?list=pl123")
+
+    assert urls == [
+        "https://www.youtube.com/watch?v=abc123",
+        "https://www.youtube.com/watch?v=def456",
+    ]

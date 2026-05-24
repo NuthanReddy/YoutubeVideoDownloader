@@ -46,6 +46,7 @@ class DownloadRequest:
     subtitle_format: str = DEFAULT_SUBTITLE_FORMAT
     output_template: str = DEFAULT_FILENAME_TEMPLATE
     restrict_filenames: bool = False
+    concurrent_fragments: int = 1
 
     def __post_init__(self) -> None:
         normalized_url = self.url.strip()
@@ -64,6 +65,10 @@ class DownloadRequest:
         object.__setattr__(self, "output_dir", normalized_output_dir)
         object.__setattr__(self, "resolution", normalized_resolution)
         object.__setattr__(self, "subtitle_languages", normalized_languages)
+
+        if int(self.concurrent_fragments) <= 0:
+            raise ValueError("Concurrent fragments must be greater than zero.")
+        object.__setattr__(self, "concurrent_fragments", int(self.concurrent_fragments))
 
         if not self.download_subtitles and self.embed_subtitles:
             object.__setattr__(self, "embed_subtitles", False)
@@ -134,4 +139,3 @@ def normalize_subtitle_languages(
 
     unique_languages = tuple(dict.fromkeys(normalized))
     return unique_languages
-

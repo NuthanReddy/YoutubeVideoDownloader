@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .config import DEFAULT_OUTPUT_DIR, DEFAULT_SUBTITLE_LANGUAGES
 from .models import (
@@ -86,7 +87,30 @@ def download(
             help="Use yt-dlp restricted filenames for cross-platform safety.",
         ),
     ] = False,
-) -> None:
+    playlist: Annotated[
+        bool,
+        typer.Option(
+            "--playlist/--single",
+            help="Treat URL as playlist and download all videos.",
+        ),
+    ] = False,
+    playlist_workers: Annotated[
+        int,
+        typer.Option(
+            "--playlist-workers",
+            min=1,
+            help="Number of parallel workers used when downloading playlist videos.",
+        ),
+    ] = 3,
+    concurrent_fragments: Annotated[
+        int,
+        typer.Option(
+            "--concurrent-fragments",
+            min=1,
+            help="Concurrent fragment downloads per video (helps DASH/HLS streams).",
+        ),
+    ] = 1,
+ ) -> None:
     """Download a single YouTube video."""
 
     try:
@@ -105,8 +129,66 @@ def download(
             auto_subtitles=auto_subtitles,
             embed_subtitles=embed_subtitles,
             restrict_filenames=restrict_filenames,
+            concurrent_fragments=concurrent_fragments,
         )
-        result = DownloadService().download(request)
+        service = DownloadService()
+
+        if playlist:
+            video_urls = service.list_playlist_video_urls(url)
+            if not video_urls:
+                raise DownloadError("No playlist videos were found.")
+
+            typer.echo(f"Found {len(video_urls)} videos in playlist. Starting parallel download...")
+            failures: list[tuple[str, str]] = []
+            completed = 0
+            with ThreadPoolExecutor(max_workers=playlist_workers) as executor:
+                futures = {
+                    executor.submit(
+                        service.download,
+                        DownloadRequest(
+                            url=video_url,
+                            output_dir=output_dir,
+                            resolution=normalized_resolution,
+                            subtitle_languages=normalized_languages,
+                            download_subtitles=subtitles,
+                            auto_subtitles=auto_subtitles,
+                            embed_subtitles=embed_subtitles,
+                            restrict_filenames=restrict_filenames,
+                            concurrent_fragments=concurrent_fragments,
+                        ),
+                    ): video_url
+                    for video_url in video_urls
+                }
+
+                for future in as_completed(futures):
+                    video_url = futures[future]
+                    try:
+                        item_result = future.result()
+                        completed += 1
+                        title = item_result.title or item_result.video_id or video_url
+                        typer.secho(
+                            f"[{completed}/{len(video_urls)}] Downloaded: {title}",
+                            fg=typer.colors.GREEN,
+                        )
+                    except Exception as exc:
+                        failures.append((video_url, str(exc)))
+
+            if failures:
+                typer.secho(
+                    f"Playlist download finished with {len(failures)} failure(s).",
+                    fg=typer.colors.YELLOW,
+                )
+                for failed_url, reason in failures:
+                    typer.secho(f"- {failed_url}: {reason}", fg=typer.colors.RED)
+                raise typer.Exit(code=1)
+
+            typer.secho(
+                f"Playlist download completed ({completed}/{len(video_urls)}).",
+                fg=typer.colors.GREEN,
+            )
+            return
+
+        result = service.download(request)
     except (ResolutionParseError, SubtitleLanguageError, ValueError) as exc:
         typer.secho(f"Configuration error: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
@@ -151,6 +233,24 @@ def formats(
         )
 
 
+@app.command("gui")
+def gui(
+    output_dir: Annotated[
+        Path,
+        typer.Option(
+            "--output-dir",
+            "-o",
+            help="Directory where downloaded files will be stored and managed.",
+        ),
+    ] = DEFAULT_OUTPUT_DIR,
+) -> None:
+    """Launch the desktop GUI."""
+
+    # Import lazily so environments without Tk still allow CLI-only usage.
+    from .gui import launch_gui
+
+    launch_gui(output_dir=output_dir)
+
+
 def main() -> None:
     app()
-

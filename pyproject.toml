@@ -11,10 +11,14 @@ dependencies = [
 
 [project.scripts]
 youtube-video-downloader = "youtube_video_downloader.cli:main"
+youtube-video-downloader-gui = "youtube_video_downloader.gui_main:main"
 
 [dependency-groups]
 dev = [
     "pytest>=8.3,<9.0",
+]
+build = [
+    "pyinstaller>=6.10,<7.0",
 ]
 
 [build-system]
@@ -27,4 +31,3 @@ packages = ["src/youtube_video_downloader"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-

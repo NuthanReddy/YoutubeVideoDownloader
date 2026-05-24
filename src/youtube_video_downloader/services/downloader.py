@@ -27,6 +27,7 @@ class DownloadService:
             "noplaylist": True,
             "restrictfilenames": request.restrict_filenames,
             "merge_output_format": "mp4",
+            "concurrent_fragment_downloads": request.concurrent_fragments,
         }
 
         if request.download_subtitles:
@@ -86,6 +87,54 @@ class DownloadService:
         formats = info.get("formats") or []
         entries = [self._to_format_info(item) for item in formats]
         return sorted(entries, key=lambda item: (item.height or 0, item.format_id), reverse=True)
+
+    def list_playlist_video_urls(self, url: str) -> list[str]:
+        """Return individual video URLs when the input is a playlist URL."""
+
+        options = {
+            "quiet": True,
+            "skip_download": True,
+            "extract_flat": True,
+            "noplaylist": False,
+        }
+
+        try:
+            with self._ydl_factory(options) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except Exception as exc:  # pragma: no cover - library/network dependent
+            raise DownloadError(str(exc)) from exc
+
+        if not info:
+            raise DownloadError("No playlist metadata was returned by yt-dlp.")
+
+        entries = info.get("entries") or []
+        if not entries:
+            return [url]
+
+        urls: list[str] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+
+            webpage_url = entry.get("webpage_url")
+            if isinstance(webpage_url, str) and webpage_url:
+                urls.append(webpage_url)
+                continue
+
+            entry_url = entry.get("url")
+            if isinstance(entry_url, str) and entry_url:
+                if entry_url.startswith("http://") or entry_url.startswith("https://"):
+                    urls.append(entry_url)
+                else:
+                    urls.append(f"https://www.youtube.com/watch?v={entry_url}")
+                continue
+
+            video_id = entry.get("id")
+            if isinstance(video_id, str) and video_id:
+                urls.append(f"https://www.youtube.com/watch?v={video_id}")
+
+        unique_urls = list(dict.fromkeys(urls))
+        return unique_urls or [url]
 
     @staticmethod
     def _build_format_selector(resolution: int | None) -> str:
@@ -167,4 +216,3 @@ class DownloadService:
             vcodec=item.get("vcodec"),
             acodec=item.get("acodec"),
         )
-
