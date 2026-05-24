@@ -11,7 +11,7 @@ def test_open_path_uses_startfile_on_windows(monkeypatch, tmp_path):
     def fake_startfile(value):
         called["value"] = value
 
-    monkeypatch.setattr(gui.os, "startfile", fake_startfile)
+    monkeypatch.setattr(gui.os, "startfile", fake_startfile, raising=False)
 
     gui._open_path_in_file_manager(tmp_path)
 
@@ -33,4 +33,3 @@ def test_open_path_uses_open_on_macos(monkeypatch, tmp_path):
 
     assert called["cmd"] == ["open", str(tmp_path.resolve())]
     assert called["check"] is True
-
