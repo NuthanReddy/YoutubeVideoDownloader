@@ -1,0 +1,30 @@
+[project]
+name = "youtube-video-downloader"
+version = "0.1.0"
+description = "A uv-managed Python CLI for downloading YouTube videos with configurable resolution and subtitles."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "typer>=0.16,<1.0",
+    "yt-dlp>=2025.3.31",
+]
+
+[project.scripts]
+youtube-video-downloader = "youtube_video_downloader.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<9.0",
+]
+
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/youtube_video_downloader"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
