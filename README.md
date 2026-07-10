@@ -225,9 +225,10 @@ Notes:
 - PyInstaller does not cross-compile; build on Windows for the `.exe` folder and on macOS for the `.app`.
 - Install `ffmpeg` separately for best-quality downloads that require stream merging.
 - You can also trigger `.github/workflows/build-desktop.yml` (GitHub Actions) to produce all
-  release artifacts in one run: a **Windows** zip, a **macOS Intel** (`macos-13`, x86_64) zip, and a
-  **macOS Apple Silicon** (`macos-14`, arm64) zip. Pushing a `vX.Y.Z` tag also publishes a GitHub Release
-  with those three assets attached.
+  release artifacts in one run: a **Windows** zip, a **macOS Intel** (x86_64) zip, and a
+  **macOS Apple Silicon** (arm64) zip. Both macOS builds run on Apple Silicon runners — the Intel
+  one is produced as a native x86_64 app via Rosetta 2, so it runs natively on Intel Macs. Pushing a
+  `vX.Y.Z` tag also publishes a GitHub Release with those three assets attached.
 
 ### Download a prebuilt release
 

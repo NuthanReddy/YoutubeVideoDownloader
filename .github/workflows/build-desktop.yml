@@ -20,10 +20,12 @@ jobs:
         include:
           - os: windows-latest
             artifact_name: YouTubeVideoDownloader-windows
-          - os: macos-13
-            artifact_name: YouTubeVideoDownloader-macos-intel
           - os: macos-14
             artifact_name: YouTubeVideoDownloader-macos-apple-silicon
+            target_arch: arm64
+          - os: macos-14
+            artifact_name: YouTubeVideoDownloader-macos-intel
+            target_arch: x86_64
 
     runs-on: ${{ matrix.os }}
 
@@ -44,6 +46,16 @@ jobs:
       - name: Install uv
         run: python -m pip install --upgrade uv
 
+      - name: Set up x86_64 Python via Rosetta (macOS Intel build)
+        if: matrix.target_arch == 'x86_64'
+        run: |
+          sudo softwareupdate --install-rosetta --agree-to-license
+          uv python install cpython-3.12-macos-x86_64
+          PYBIN="$(uv python find cpython-3.12-macos-x86_64)"
+          echo "Selected interpreter: $PYBIN"
+          file "$PYBIN"
+          echo "UV_PYTHON=$PYBIN" >> "$GITHUB_ENV"
+
       - name: Install dependencies
         run: uv sync --group build
 
@@ -52,6 +64,15 @@ jobs:
 
       - name: Build desktop app
         run: uv run --group build python scripts/build_desktop_app.py
+
+      - name: Verify macOS app architecture
+        if: runner.os == 'macOS'
+        run: |
+          BIN="dist/macos/YouTubeVideoDownloader.app/Contents/MacOS/YouTubeVideoDownloader"
+          echo "Expected arch: ${{ matrix.target_arch }}"
+          file "$BIN"
+          lipo -archs "$BIN"
+          lipo -archs "$BIN" | grep -q "${{ matrix.target_arch }}"
 
       # --- Windows: zip the onedir folder -------------------------------------
       - name: Zip Windows app
