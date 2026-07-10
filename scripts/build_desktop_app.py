@@ -29,6 +29,10 @@ def _platform_suffix() -> str:
 def build() -> int:
     dist_path = ROOT / "dist" / _platform_suffix()
     build_path = ROOT / "build" / _platform_suffix()
+    is_windows = platform.system().lower() == "windows"
+    data_sep = ";" if is_windows else ":"
+    icon_png = ROOT / "assets" / "app_icon.png"
+    icon_ico = ROOT / "assets" / "app_icon.ico"
 
     command = [
         sys.executable,
@@ -48,12 +52,19 @@ def build() -> int:
         str(build_path),
         "--collect-submodules",
         "yt_dlp",
+        "--add-data",
+        f"{icon_png}{data_sep}assets",
+        "--add-data",
+        f"{icon_ico}{data_sep}assets",
         "--paths",
         str(ROOT / "src"),
         "--hidden-import",
         "tkinter",
         str(ENTRY_SCRIPT),
     ]
+
+    if is_windows:
+        command.extend(["--icon", str(icon_ico)])
 
     print("Building desktop app bundle...")
     print(" ".join(command))

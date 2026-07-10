@@ -6,6 +6,7 @@ from youtube_video_downloader.services.downloader import DownloadService
 
 class FakeYoutubeDL:
     last_options = None
+    last_url = None
 
     def __init__(self, options):
         self.options = options
@@ -19,6 +20,7 @@ class FakeYoutubeDL:
         return False
 
     def extract_info(self, url, download):
+        FakeYoutubeDL.last_url = url
         if self.options.get("extract_flat"):
             return {
                 "id": "pl123",
@@ -100,6 +102,35 @@ def test_download_returns_detected_output_path(tmp_path):
     assert result.output_path == tmp_path / "Sample [abc123]" / "Sample [abc123].mp4"
 
 
+def test_download_wires_progress_hook(tmp_path):
+    request = DownloadRequest(
+        url="https://example.com/watch?v=abc123",
+        output_dir=tmp_path,
+        resolution=720,
+    )
+
+    def hook(_status):
+        return None
+
+    service = DownloadService(ydl_factory=FakeYoutubeDL)
+    service.download(request, progress_hook=hook)
+
+    assert FakeYoutubeDL.last_options["progress_hooks"] == [hook]
+
+
+def test_download_without_hook_has_no_progress_hooks(tmp_path):
+    request = DownloadRequest(
+        url="https://example.com/watch?v=abc123",
+        output_dir=tmp_path,
+        resolution=720,
+    )
+
+    service = DownloadService(ydl_factory=FakeYoutubeDL)
+    service.download(request)
+
+    assert "progress_hooks" not in FakeYoutubeDL.last_options
+
+
 def test_list_formats_returns_sorted_entries():
     service = DownloadService(ydl_factory=FakeYoutubeDL)
     formats = service.list_formats("https://example.com/watch?v=abc123")
@@ -117,3 +148,43 @@ def test_list_playlist_video_urls_expands_entries():
         "https://www.youtube.com/watch?v=abc123",
         "https://www.youtube.com/watch?v=def456",
     ]
+
+
+def test_list_playlist_video_urls_normalizes_watch_list_url():
+    service = DownloadService(ydl_factory=FakeYoutubeDL)
+    urls = service.list_playlist_video_urls(
+        "https://www.youtube.com/watch?v=NLycrsJ1jI8&list=PLabc123"
+    )
+
+    assert FakeYoutubeDL.last_url == "https://www.youtube.com/playlist?list=PLabc123"
+    assert urls == [
+        "https://www.youtube.com/watch?v=abc123",
+        "https://www.youtube.com/watch?v=def456",
+    ]
+
+
+def test_playlist_url_from_variants():
+    normalize = DownloadService._playlist_url_from
+
+    assert (
+        normalize("https://www.youtube.com/watch?v=x&list=PLabc")
+        == "https://www.youtube.com/playlist?list=PLabc"
+    )
+    assert (
+        normalize("https://youtu.be/x?list=PLabc")
+        == "https://www.youtube.com/playlist?list=PLabc"
+    )
+    # Already a playlist URL, a plain video, an auto-mix, and non-YouTube: unchanged.
+    assert (
+        normalize("https://www.youtube.com/playlist?list=PLabc")
+        == "https://www.youtube.com/playlist?list=PLabc"
+    )
+    assert normalize("https://www.youtube.com/watch?v=x") == "https://www.youtube.com/watch?v=x"
+    assert (
+        normalize("https://www.youtube.com/watch?v=x&list=RDxyz")
+        == "https://www.youtube.com/watch?v=x&list=RDxyz"
+    )
+    assert (
+        normalize("https://example.com/watch?v=x&list=PLabc")
+        == "https://example.com/watch?v=x&list=PLabc"
+    )
