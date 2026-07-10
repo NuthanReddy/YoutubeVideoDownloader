@@ -15,16 +15,22 @@ permissions:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
             artifact_name: YouTubeVideoDownloader-windows
-            artifact_path: dist/windows/YouTubeVideoDownloader.exe
-          - os: macos-latest
-            artifact_name: YouTubeVideoDownloader-macos
-            artifact_path: dist/macos/YouTubeVideoDownloader.app
+          - os: macos-13
+            artifact_name: YouTubeVideoDownloader-macos-intel
+          - os: macos-14
+            artifact_name: YouTubeVideoDownloader-macos-apple-silicon
 
     runs-on: ${{ matrix.os }}
+
+    env:
+      # Stamp the macOS bundle's minimum OS so it runs on macOS 12.x (Monterey).
+      # Ignored on Windows.
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
 
     steps:
       - name: Checkout
@@ -47,25 +53,35 @@ jobs:
       - name: Build desktop app
         run: uv run --group build python scripts/build_desktop_app.py
 
+      # --- Windows: zip the onedir folder -------------------------------------
+      - name: Zip Windows app
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/windows/YouTubeVideoDownloader `
+            -DestinationPath dist/windows/${{ matrix.artifact_name }}.zip -Force
+
       - name: Upload Windows artifact
-        if: matrix.os == 'windows-latest'
+        if: runner.os == 'Windows'
         uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.artifact_name }}
-          path: ${{ matrix.artifact_path }}
+          path: dist/windows/${{ matrix.artifact_name }}.zip
 
+      # --- macOS: zip the .app bundle (preserves symlinks & bundle layout) -----
       - name: Zip macOS app
-        if: matrix.os == 'macos-latest'
+        if: runner.os == 'macOS'
         run: |
           cd dist/macos
-          ditto -c -k --sequesterRsrc --keepParent YouTubeVideoDownloader.app YouTubeVideoDownloader.app.zip
+          ditto -c -k --sequesterRsrc --keepParent \
+            YouTubeVideoDownloader.app ${{ matrix.artifact_name }}.zip
 
       - name: Upload macOS artifact
-        if: matrix.os == 'macos-latest'
+        if: runner.os == 'macOS'
         uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.artifact_name }}
-          path: dist/macos/YouTubeVideoDownloader.app.zip
+          path: dist/macos/${{ matrix.artifact_name }}.zip
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -73,22 +89,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download Windows artifact
+      - name: Download all artifacts
         uses: actions/download-artifact@v5
         with:
-          name: YouTubeVideoDownloader-windows
-          path: release-assets/windows
-
-      - name: Download macOS artifact
-        uses: actions/download-artifact@v5
-        with:
-          name: YouTubeVideoDownloader-macos
-          path: release-assets/macos
+          path: release-assets
 
       - name: Publish release and upload assets
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
-            release-assets/windows/YouTubeVideoDownloader.exe
-            release-assets/macos/YouTubeVideoDownloader.app.zip
+            release-assets/YouTubeVideoDownloader-windows/YouTubeVideoDownloader-windows.zip
+            release-assets/YouTubeVideoDownloader-macos-intel/YouTubeVideoDownloader-macos-intel.zip
+            release-assets/YouTubeVideoDownloader-macos-apple-silicon/YouTubeVideoDownloader-macos-apple-silicon.zip

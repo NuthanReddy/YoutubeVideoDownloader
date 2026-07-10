@@ -30,9 +30,11 @@ def build() -> int:
     dist_path = ROOT / "dist" / _platform_suffix()
     build_path = ROOT / "build" / _platform_suffix()
     is_windows = platform.system().lower() == "windows"
+    is_macos = platform.system().lower() == "darwin"
     data_sep = ";" if is_windows else ":"
     icon_png = ROOT / "assets" / "app_icon.png"
     icon_ico = ROOT / "assets" / "app_icon.ico"
+    icon_icns = ROOT / "assets" / "app_icon.icns"
 
     command = [
         sys.executable,
@@ -41,7 +43,7 @@ def build() -> int:
         "--noconfirm",
         "--clean",
         "--windowed",
-        "--onefile",
+        "--onedir",
         "--name",
         APP_NAME,
         "--distpath",
@@ -65,18 +67,20 @@ def build() -> int:
 
     if is_windows:
         command.extend(["--icon", str(icon_ico)])
+    elif is_macos:
+        command.extend(["--icon", str(icon_icns)])
 
     print("Building desktop app bundle...")
     print(" ".join(command))
     result = subprocess.run(command, cwd=ROOT, check=False)
 
     if result.returncode == 0:
-        if platform.system().lower() == "windows":
-            artifact = dist_path / f"{APP_NAME}.exe"
-        elif platform.system().lower() == "darwin":
+        if is_windows:
+            artifact = dist_path / APP_NAME / f"{APP_NAME}.exe"
+        elif is_macos:
             artifact = dist_path / f"{APP_NAME}.app"
         else:
-            artifact = dist_path / APP_NAME
+            artifact = dist_path / APP_NAME / APP_NAME
         print(f"Build complete: {artifact}")
 
     return result.returncode

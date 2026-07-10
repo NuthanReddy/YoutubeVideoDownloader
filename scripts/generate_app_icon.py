@@ -23,12 +23,29 @@ ROOT = Path(__file__).resolve().parents[1]
 ASSETS_DIR = ROOT / "assets"
 PNG_PATH = ASSETS_DIR / "app_icon.png"
 ICO_PATH = ASSETS_DIR / "app_icon.ico"
+ICNS_PATH = ASSETS_DIR / "app_icon.icns"
 
 # The master PNG used for iconphoto / non-Windows platforms.
 MASTER_SIZE = 256
 # Sizes baked into the .ico. Small sizes -> BMP, large -> PNG (see _build_ico).
 ICO_SIZES = (16, 32, 48, 64, 128, 256)
 BMP_MAX_SIZE = 64  # sizes <= this are stored as BMP/DIB inside the ICO
+
+# macOS .icns: OSType -> pixel size, using PNG-compressed entries (10.7+). The
+# @2x retina types reuse a doubled pixel size (e.g. ic11 = 16pt@2x = 32px).
+ICNS_TYPES: tuple[tuple[bytes, int], ...] = (
+    (b"icp4", 16),
+    (b"icp5", 32),
+    (b"icp6", 64),
+    (b"ic07", 128),
+    (b"ic08", 256),
+    (b"ic09", 512),
+    (b"ic10", 1024),
+    (b"ic11", 32),
+    (b"ic12", 64),
+    (b"ic13", 256),
+    (b"ic14", 512),
+)
 
 # Diagonal gradient colour stops (t = 0 at top-left, 1 at bottom-right).
 _GRADIENT = (
@@ -245,30 +262,68 @@ def _build_ico(images: list[tuple[int, bytes, bool]]) -> bytes:
     return bytes(directory) + bytes(body)
 
 
+_render_cache: dict[int, bytes] = {}
+
+
+def _ss_for(size: int) -> int:
+    """Pick a supersample factor: heavier for small icons where edges matter."""
+
+    if size <= 128:
+        return 4
+    if size <= 256:
+        return 3
+    return 2
+
+
+def _render_cached(size: int) -> bytes:
+    rgba = _render_cache.get(size)
+    if rgba is None:
+        rgba = _render_rgba(size, supersample=_ss_for(size))
+        _render_cache[size] = rgba
+    return rgba
+
+
+def _build_icns(types: tuple[tuple[bytes, int], ...]) -> bytes:
+    """Assemble a macOS ``.icns`` from PNG-compressed entries.
+
+    Each entry is ``OSType(4) + big-endian length(4, incl. header) + PNG data``;
+    the file is prefixed with ``icns`` + total length.
+    """
+
+    entries = bytearray()
+    for ostype, size in types:
+        png = _encode_png(size, _render_cached(size))
+        entries += ostype + struct.pack(">I", 8 + len(png)) + png
+    return b"icns" + struct.pack(">I", 8 + len(entries)) + bytes(entries)
+
+
 def main() -> None:
     ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
     # Master PNG (256) for iconphoto / non-Windows use.
-    master_rgba = _render_rgba(MASTER_SIZE, supersample=3)
-    PNG_PATH.write_bytes(_encode_png(MASTER_SIZE, master_rgba))
+    PNG_PATH.write_bytes(_encode_png(MASTER_SIZE, _render_cached(MASTER_SIZE)))
 
+    # Windows .ico (multi-size; BMP for small, PNG for large).
     images: list[tuple[int, bytes, bool]] = []
     for size in ICO_SIZES:
-        if size == MASTER_SIZE:
-            rgba = master_rgba
-        else:
-            rgba = _render_rgba(size, supersample=4 if size <= 128 else 3)
+        rgba = _render_cached(size)
         if size <= BMP_MAX_SIZE:
             images.append((size, _encode_bmp(size, rgba), False))
         else:
             images.append((size, _encode_png(size, rgba), True))
-
     ICO_PATH.write_bytes(_build_ico(images))
+
+    # macOS .icns (PNG entries, including retina @2x sizes).
+    ICNS_PATH.write_bytes(_build_icns(ICNS_TYPES))
 
     print(f"Generated: {PNG_PATH}")
     print(
         f"Generated: {ICO_PATH} ({len(ICO_SIZES)} sizes: "
         f"{', '.join(str(s) for s in ICO_SIZES)})"
+    )
+    print(
+        f"Generated: {ICNS_PATH} ({len(ICNS_TYPES)} entries: "
+        f"{', '.join(t.decode() for t, _ in ICNS_TYPES)})"
     )
 
 
