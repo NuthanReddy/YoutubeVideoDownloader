@@ -7,6 +7,7 @@ Run with uv so the build dependency group is resolved automatically:
 from __future__ import annotations
 
 import platform
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -26,6 +27,41 @@ def _platform_suffix() -> str:
     return system
 
 
+def _stage_ffmpeg(stage_dir: Path, is_windows: bool) -> Path | None:
+    """Copy imageio-ffmpeg's bundled binary to a clean ``ffmpeg`` name.
+
+    ``imageio-ffmpeg`` ships an architecture-matched ffmpeg inside its wheel, so
+    the binary automatically matches the interpreter PyInstaller is freezing
+    (Windows x64, macOS x86_64 under Rosetta, macOS arm64). We copy it to a
+    predictable filename so the app can point ``ffmpeg_location`` at the folder
+    without depending on imageio's versioned name.
+    """
+
+    try:
+        import imageio_ffmpeg
+    except ImportError:
+        print(
+            "WARNING: imageio-ffmpeg is not installed; the app will be built "
+            "WITHOUT a bundled ffmpeg. Install the build dependency group "
+            "(uv run --group build ...) so downloads can merge HD streams.",
+            file=sys.stderr,
+        )
+        return None
+
+    source = Path(imageio_ffmpeg.get_ffmpeg_exe())
+    if not source.exists():
+        print(f"WARNING: imageio-ffmpeg binary not found at {source}", file=sys.stderr)
+        return None
+
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    target = stage_dir / ("ffmpeg.exe" if is_windows else "ffmpeg")
+    shutil.copy2(source, target)
+    if not is_windows:
+        target.chmod(0o755)
+    print(f"Staged ffmpeg: {source} -> {target}")
+    return target
+
+
 def build() -> int:
     dist_path = ROOT / "dist" / _platform_suffix()
     build_path = ROOT / "build" / _platform_suffix()
@@ -35,6 +71,8 @@ def build() -> int:
     icon_png = ROOT / "assets" / "app_icon.png"
     icon_ico = ROOT / "assets" / "app_icon.ico"
     icon_icns = ROOT / "assets" / "app_icon.icns"
+
+    ffmpeg_binary = _stage_ffmpeg(build_path / "ffmpeg_stage", is_windows)
 
     command = [
         sys.executable,
@@ -64,6 +102,9 @@ def build() -> int:
         "tkinter",
         str(ENTRY_SCRIPT),
     ]
+
+    if ffmpeg_binary is not None:
+        command[-1:-1] = ["--add-binary", f"{ffmpeg_binary}{data_sep}ffmpeg_bin"]
 
     if is_windows:
         command.extend(["--icon", str(icon_ico)])

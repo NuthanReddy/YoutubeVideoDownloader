@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
@@ -14,6 +16,44 @@ from ..models import DownloadRequest, DownloadResult, FormatInfo
 
 class DownloadError(RuntimeError):
     """Raised when yt-dlp cannot complete the request."""
+
+
+def _ffmpeg_location() -> str | None:
+    """Locate an ffmpeg binary for yt-dlp's merge/embed post-processing.
+
+    yt-dlp needs ffmpeg to merge the separate best-quality video and audio
+    streams YouTube serves (and to embed subtitles). We deliberately do **not**
+    rely on the system ``PATH``: desktop apps launched from Finder/Explorer do
+    not inherit the shell ``PATH``, so a user-installed ffmpeg is invisible and
+    yt-dlp silently falls back to a low-resolution pre-muxed stream (e.g. 360p).
+
+    Resolution order:
+
+    1. A binary bundled beside the frozen app (``sys._MEIPASS/ffmpeg_bin``).
+    2. The arch-matched binary shipped by ``imageio-ffmpeg`` when it is
+       importable (covers source/dev runs and the build environment).
+
+    Returns ``None`` when neither is available, letting yt-dlp fall back to its
+    default ``PATH`` lookup.
+    """
+
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        binary = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+        candidate = Path(base) / "ffmpeg_bin" / binary
+        if candidate.exists():
+            return str(candidate.parent)
+
+    try:
+        import imageio_ffmpeg  # noqa: PLC0415 - optional, only present with build deps
+
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if exe and Path(exe).exists():
+            return exe
+    except Exception:  # pragma: no cover - depends on optional dependency
+        pass
+
+    return None
 
 
 def _youtube_extractor_options() -> dict[str, Any]:
@@ -61,6 +101,10 @@ class DownloadService:
         postprocessors = self._build_postprocessors(request)
         if postprocessors:
             options["postprocessors"] = postprocessors
+
+        ffmpeg_location = _ffmpeg_location()
+        if ffmpeg_location:
+            options["ffmpeg_location"] = ffmpeg_location
 
         return options
 

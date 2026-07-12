@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from youtube_video_downloader.models import DownloadRequest
+from youtube_video_downloader.services import downloader as downloader_module
 from youtube_video_downloader.services.downloader import DownloadService
 
 
@@ -85,6 +86,36 @@ def test_build_options_include_resolution_and_subtitles(tmp_path):
     assert options["subtitleslangs"] == ["en", "hi"]
     assert options["postprocessors"][0]["key"] == "FFmpegSubtitlesConvertor"
     assert options["postprocessors"][1]["key"] == "FFmpegEmbedSubtitle"
+
+
+def test_build_options_sets_ffmpeg_location_when_available(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        downloader_module, "_ffmpeg_location", lambda: "/opt/ffmpeg_bin"
+    )
+    request = DownloadRequest(
+        url="https://example.com/watch?v=abc123",
+        output_dir=tmp_path,
+        download_subtitles=False,
+    )
+
+    service = DownloadService(ydl_factory=FakeYoutubeDL)
+    options = service.build_options(request)
+
+    assert options["ffmpeg_location"] == "/opt/ffmpeg_bin"
+
+
+def test_build_options_omits_ffmpeg_location_when_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setattr(downloader_module, "_ffmpeg_location", lambda: None)
+    request = DownloadRequest(
+        url="https://example.com/watch?v=abc123",
+        output_dir=tmp_path,
+        download_subtitles=False,
+    )
+
+    service = DownloadService(ydl_factory=FakeYoutubeDL)
+    options = service.build_options(request)
+
+    assert "ffmpeg_location" not in options
 
 
 def test_download_returns_detected_output_path(tmp_path):

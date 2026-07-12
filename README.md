@@ -10,11 +10,12 @@ and a local library manager.
 **Core**
 
 - Configurable maximum resolution (for example `720`, `1080`, `1440`, `2160`, or `best`)
-- Subtitle download, automatic (generated) subtitles, and optional embedding when `ffmpeg` is available
+- Subtitle download, automatic (generated) subtitles, and optional embedding (uses the bundled `ffmpeg` in the desktop apps)
 - Per-video output folders (`<title> [<id>]`) containing media and subtitle files
 - Parallel playlist downloads with a configurable worker count (CLI and GUI)
 - Per-video concurrent fragment downloads for DASH/HLS streams
-- Resilient extraction that uses YouTube's **Android player client** by default to avoid `HTTP 429` blocks (see [Troubleshooting](#troubleshooting))
+- Resilient extraction that defers to yt-dlp's maintained **default player clients** so the full HD/4K format ladder stays available (see [Troubleshooting](#troubleshooting))
+- **`ffmpeg` bundled** in the packaged desktop apps, so HD merges and subtitle embedding work with no separate install
 
 **Desktop GUI**
 
@@ -31,7 +32,7 @@ and a local library manager.
 
 - **Python 3.12+**
 - **[uv](https://docs.astral.sh/uv/)** for dependency management
-- **`ffmpeg`** (recommended) for merging separate video/audio streams and embedding subtitles
+- **`ffmpeg`** on your `PATH` when running from source, for merging separate video/audio streams and embedding subtitles. **The packaged desktop apps bundle `ffmpeg`**, so end users don't need to install it.
 - A network connection (the download engine is `yt-dlp`)
 
 ## Setup
@@ -153,10 +154,10 @@ Playlist items are grouped under a folder named after the playlist.
 A few defaults live in `src/youtube_video_downloader/config.py`:
 
 - `DEFAULT_PLAYER_CLIENTS` — the ordered list of yt-dlp YouTube *player clients*
-  to try. It defaults to `("android", "web")` because YouTube rate-limits and
-  bot-blocks the default `web` client (`HTTP 429`), which otherwise makes every
-  download fail. The Android endpoint is not blocked and also avoids the new
-  JavaScript-runtime requirement.
+  to try. It defaults to `("default",)`, which lets yt-dlp choose its own
+  maintained set of clients. This exposes the full HD/4K (DASH) format ladder;
+  older pins such as `android` are now caught by YouTube's "SABR-only" experiment
+  and return only low-resolution progressive formats (see Troubleshooting).
 - `DEFAULT_EXTRACTOR_RETRIES` — extra extraction attempts to ride out transient errors.
 - `DEFAULT_FILENAME_TEMPLATE` / `PLAYLIST_ITEM_FILENAME_TEMPLATE` — output naming.
 - `DEFAULT_SUBTITLE_LANGUAGES` / `DEFAULT_SUBTITLE_FORMAT` — subtitle defaults.
@@ -165,28 +166,34 @@ A few defaults live in `src/youtube_video_downloader/config.py`:
 
 **"This video is not available" / `HTTP Error 429: Too Many Requests`**
 
-YouTube is rate-limiting or bot-blocking the default `web` client. The app already
-defaults to the Android player client to avoid this. If it still happens:
+YouTube is rate-limiting or bot-blocking extraction. If it happens:
 
 - Wait a few minutes for the rate limit to clear, then retry (use the GUI **Retry** button).
 - Lower the worker count (GUI `Workers` spinner or `--playlist-workers`) so fewer requests hit YouTube at once.
-- Confirm `DEFAULT_PLAYER_CLIENTS` in `config.py` still lists `android` first.
+- The app uses yt-dlp's `("default",)` player clients; keep yt-dlp up to date (`uv lock --upgrade-package yt-dlp`) since YouTube's anti-bot behavior changes often.
 
-**Only low resolutions are offered for some videos**
+**Only low resolutions (e.g. 360p) are offered, or 4K reverts to 360p**
 
-YouTube occasionally runs a "SABR-only" streaming experiment that hides higher
-formats from the Android client. This is a temporary server-side change; retrying
-later, or once impersonation support is installed, usually restores more formats.
+Two causes, both handled by the current defaults:
+
+- **`ffmpeg` missing** — without it, yt-dlp can't merge separate video/audio streams
+  and falls back to the best *pre-muxed* progressive stream, which YouTube caps at
+  360p. The desktop apps bundle `ffmpeg`; when running from source, install it and
+  put it on your `PATH`.
+- **A pinned player client hitting SABR** — YouTube's "SABR-only" experiment strips
+  HD/DASH formats from clients like `android`. The default `("default",)` avoids
+  this. If you changed `DEFAULT_PLAYER_CLIENTS`, revert it to `("default",)`.
 
 **`WARNING: No supported JavaScript runtime could be found`**
 
-The `web` client increasingly needs a JS runtime (Deno). Using the Android client
-(the default here) sidesteps this, so the warning is harmless. Installing
-[Deno](https://deno.com/) removes it entirely.
+Some player clients increasingly need a JS runtime (Deno). The warning is usually
+harmless — yt-dlp falls back to another client. Installing [Deno](https://deno.com/)
+removes it entirely.
 
 **Merged video/audio or embedded subtitles are missing**
 
-Install `ffmpeg` and ensure it is on your `PATH`.
+The desktop apps bundle `ffmpeg`, so this should "just work". When running from
+source, install `ffmpeg` and ensure it is on your `PATH`.
 
 **`ModuleNotFoundError` / GUI won't import `tkinter`**
 
@@ -223,7 +230,7 @@ Artifacts (built with PyInstaller `--onedir` for reliable DLL loading):
 Notes:
 
 - PyInstaller does not cross-compile; build on Windows for the `.exe` folder and on macOS for the `.app`.
-- Install `ffmpeg` separately for best-quality downloads that require stream merging.
+- `ffmpeg` is bundled automatically (via `imageio-ffmpeg` in the `build` dependency group), so the packaged app needs no separate `ffmpeg` install.
 - You can also trigger `.github/workflows/build-desktop.yml` (GitHub Actions) to produce all
   release artifacts in one run: a **Windows** zip, a **macOS Intel** (x86_64) zip, and a
   **macOS Apple Silicon** (arm64) zip. Both macOS builds run on Apple Silicon runners — the Intel
