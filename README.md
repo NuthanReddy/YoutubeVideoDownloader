@@ -250,17 +250,33 @@ Notes:
 - PyInstaller does not cross-compile; build on Windows for the `.exe` folder and on macOS for the `.app`.
 - `ffmpeg` is bundled automatically (via `imageio-ffmpeg` in the `build` dependency group), so the packaged app needs no separate `ffmpeg` install.
 - You can also trigger `.github/workflows/build-desktop.yml` (GitHub Actions) to produce all
-  release artifacts in one run: a **Windows** zip, a **macOS Intel** (x86_64) zip, and a
-  **macOS Apple Silicon** (arm64) zip. Both macOS builds run on Apple Silicon runners — the Intel
-  one is produced as a native x86_64 app via Rosetta 2, so it runs natively on Intel Macs. Pushing a
-  `vX.Y.Z` tag also publishes a GitHub Release with those three assets attached.
+  release artifacts in one run: a **Windows** installer (`YouTubeVideoDownloader-Setup.exe`, built
+  with Inno Setup from `installer/windows_installer.iss`), a **Windows** portable zip, a
+  **macOS Intel** (x86_64) zip, and a **macOS Apple Silicon** (arm64) zip. Both macOS builds run on
+  Apple Silicon runners — the Intel one is produced as a native x86_64 app via Rosetta 2, so it runs
+  natively on Intel Macs. Pushing a `vX.Y.Z` tag also publishes a GitHub Release with those assets
+  attached.
 
 ### Download a prebuilt release
 
-Grab the archive for your platform from the
+Grab the asset for your platform from the
 [Releases page](https://github.com/NuthanReddy/YoutubeVideoDownloader/releases):
 
-- `YouTubeVideoDownloader-windows.zip` — extract and run `YouTubeVideoDownloader.exe`.
+**Windows**
+
+- **`YouTubeVideoDownloader-Setup.exe` — recommended.** A one-click installer
+  (per-user, no admin prompt). It installs the app into a real folder, adds
+  **Start Menu** and optional **Desktop** shortcuts, and provides a clean
+  uninstaller. Launch it from the shortcut afterwards.
+- `YouTubeVideoDownloader-windows.zip` — portable alternative. **Extract the
+  whole zip to a folder first** (right-click → *Extract All…*), then run
+  `YouTubeVideoDownloader.exe` from the extracted folder — keep it next to the
+  `_internal` folder. Do **not** run the exe from inside the zip preview:
+  Windows unpacks a partial copy to `%TEMP%` and the app fails with
+  *"Failed to load Python DLL … python312.dll"*.
+
+**macOS**
+
 - `YouTubeVideoDownloader-macos-intel.zip` — Intel Macs.
 - `YouTubeVideoDownloader-macos-apple-silicon.zip` — Apple Silicon (M1/M2/M3) Macs.
 

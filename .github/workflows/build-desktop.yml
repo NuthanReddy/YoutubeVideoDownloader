@@ -89,6 +89,33 @@ jobs:
           name: ${{ matrix.artifact_name }}
           path: dist/windows/${{ matrix.artifact_name }}.zip
 
+      # --- Windows: build a one-click installer with Inno Setup ----------------
+      - name: Build Windows installer (Inno Setup)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            Write-Host "Inno Setup not found; installing via Chocolatey..."
+            choco install innosetup -y --no-progress
+          }
+          if (-not (Test-Path $iscc)) {
+            $found = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+            if ($found) { $iscc = $found.Source } else { throw "ISCC.exe not found after install" }
+          }
+          $ver = (Select-String -Path pyproject.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
+          Write-Host "Building installer version $ver using $iscc"
+          & $iscc /DMyAppVersion=$ver installer\windows_installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+          Get-ChildItem dist\installer
+
+      - name: Upload Windows installer artifact
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v5
+        with:
+          name: YouTubeVideoDownloader-windows-setup
+          path: dist/installer/YouTubeVideoDownloader-Setup.exe
+
       # --- macOS: zip the .app bundle (preserves symlinks & bundle layout) -----
       - name: Zip macOS app
         if: runner.os == 'macOS'
@@ -120,6 +147,7 @@ jobs:
         with:
           generate_release_notes: true
           files: |
+            release-assets/YouTubeVideoDownloader-windows-setup/YouTubeVideoDownloader-Setup.exe
             release-assets/YouTubeVideoDownloader-windows/YouTubeVideoDownloader-windows.zip
             release-assets/YouTubeVideoDownloader-macos-intel/YouTubeVideoDownloader-macos-intel.zip
             release-assets/YouTubeVideoDownloader-macos-apple-silicon/YouTubeVideoDownloader-macos-apple-silicon.zip
