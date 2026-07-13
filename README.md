@@ -122,7 +122,7 @@ Run with the local interpreter directly (equivalent to `uv run`):
 | Option | Default | Description |
 | --- | --- | --- |
 | `--resolution`, `-r` | `best` | Max height (`720`, `1080`, `1080p`, …) or `best` for no cap |
-| `--output-dir`, `-o` | `downloads` | Destination directory |
+| `--output-dir`, `-o` | `~/Downloads` | Destination directory (defaults to your user Downloads folder) |
 | `--subtitle-lang`, `-s` | `en` | Subtitle language; repeat for multiple |
 | `--all-subtitles` | off | Download every available subtitle language |
 | `--subtitles / --no-subtitles` | on | Toggle subtitle downloading |
@@ -135,10 +135,13 @@ Run with the local interpreter directly (equivalent to `uv run`):
 
 ## Output structure
 
-Each download is stored in its own folder under `downloads`:
+Downloads go to your user **Downloads** folder by default
+(`/Users/<username>/Downloads` on macOS, `C:\Users\<username>\Downloads` on
+Windows), overridable with `--output-dir` or the GUI **Browse** button. Each
+download is stored in its own folder under that destination:
 
-- `downloads/<video title> [<video id>]/<video title> [<video id>].mp4`
-- `downloads/<video title> [<video id>]/<video title> [<video id>].en.srt`
+- `<destination>/<video title> [<video id>]/<video title> [<video id>].mp4`
+- `<destination>/<video title> [<video id>]/<video title> [<video id>].en.srt`
 
 Playlist items are grouped under a folder named after the playlist.
 

@@ -2,7 +2,14 @@
 
 from pathlib import Path
 
-DEFAULT_OUTPUT_DIR = Path("downloads")
+# Default download location: the current user's Downloads folder. This resolves
+# to /Users/<username>/Downloads on macOS, C:\Users\<username>\Downloads on
+# Windows, and /home/<username>/Downloads on Linux. Using an absolute,
+# home-relative path (instead of a relative "downloads" folder) matters for the
+# packaged desktop app: launched from Finder/Explorer its working directory is
+# unpredictable (often "/", which isn't writable), so a relative default could
+# fail or scatter files. Users can still override this in the GUI/CLI.
+DEFAULT_OUTPUT_DIR = Path.home() / "Downloads"
 # Group each download under its own folder: <title> [<id>]/<title> [<id>].<ext>
 DEFAULT_FILENAME_TEMPLATE = "%(title)s [%(id)s]/%(title)s [%(id)s].%(ext)s"
 # Playlist items live directly inside the playlist folder (no per-video subfolder).
