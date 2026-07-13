@@ -154,10 +154,16 @@ Playlist items are grouped under a folder named after the playlist.
 A few defaults live in `src/youtube_video_downloader/config.py`:
 
 - `DEFAULT_PLAYER_CLIENTS` — the ordered list of yt-dlp YouTube *player clients*
-  to try. It defaults to `("default",)`, which lets yt-dlp choose its own
-  maintained set of clients. This exposes the full HD/4K (DASH) format ladder;
-  older pins such as `android` are now caught by YouTube's "SABR-only" experiment
-  and return only low-resolution progressive formats (see Troubleshooting).
+  to try. It defaults to `("default", "android")`. yt-dlp queries each client,
+  merges the formats they return, and only fails if **all** of them fail:
+  - `default` lets yt-dlp use its maintained client set, which exposes the full
+    HD/4K (DASH) ladder.
+  - `android` is a fallback for networks/sessions where YouTube bot-blocks the
+    web-family clients that `default` leads with (`HTTP 429` → "This video is not
+    available"). The android endpoint usually stays reachable, so downloads keep
+    working (capped at ~360p, since android is caught by YouTube's "SABR-only"
+    experiment) instead of failing outright. Where `default` succeeds, its HD
+    formats win and android's lower formats are ignored.
 - `DEFAULT_EXTRACTOR_RETRIES` — extra extraction attempts to ride out transient errors.
 - `DEFAULT_FILENAME_TEMPLATE` / `PLAYLIST_ITEM_FILENAME_TEMPLATE` — output naming.
 - `DEFAULT_SUBTITLE_LANGUAGES` / `DEFAULT_SUBTITLE_FORMAT` — subtitle defaults.
@@ -170,19 +176,28 @@ YouTube is rate-limiting or bot-blocking extraction. If it happens:
 
 - Wait a few minutes for the rate limit to clear, then retry (use the GUI **Retry** button).
 - Lower the worker count (GUI `Workers` spinner or `--playlist-workers`) so fewer requests hit YouTube at once.
-- The app uses yt-dlp's `("default",)` player clients; keep yt-dlp up to date (`uv lock --upgrade-package yt-dlp`) since YouTube's anti-bot behavior changes often.
+- The app uses `("default", "android")` player clients, so if the `default`
+  (web-family) clients are blocked it falls back to `android` (at up to 360p)
+  rather than failing. Keep yt-dlp up to date (`uv lock --upgrade-package yt-dlp`)
+  since YouTube's anti-bot behavior changes often.
 
-**Only low resolutions (e.g. 360p) are offered, or 4K reverts to 360p**
+**Downloads only ever reach 360p (never HD/4K)**
 
-Two causes, both handled by the current defaults:
+That means the `default` clients are being blocked in your network and every
+download is falling back to the SABR-restricted `android` client. Try again on a
+different network/VPN, wait for the rate limit to clear, or update yt-dlp. When
+`default` is reachable the full 2160p ladder returns automatically.
 
-- **`ffmpeg` missing** — without it, yt-dlp can't merge separate video/audio streams
-  and falls back to the best *pre-muxed* progressive stream, which YouTube caps at
-  360p. The desktop apps bundle `ffmpeg`; when running from source, install it and
-  put it on your `PATH`.
-- **A pinned player client hitting SABR** — YouTube's "SABR-only" experiment strips
-  HD/DASH formats from clients like `android`. The default `("default",)` avoids
-  this. If you changed `DEFAULT_PLAYER_CLIENTS`, revert it to `("default",)`.
+**4K reverts to 360p on the packaged app**
+
+Older releases capped at 360p for two reasons, both fixed in current builds:
+
+- **`ffmpeg` missing** — without it, yt-dlp can't merge separate video/audio
+  streams and falls back to the best *pre-muxed* progressive stream (360p). The
+  desktop apps now bundle `ffmpeg`; when running from source, install it and put
+  it on your `PATH`.
+- **A pinned player client hitting SABR** — the default client list now leads
+  with `default` (full HD) and only falls back to `android` (360p) when blocked.
 
 **`WARNING: No supported JavaScript runtime could be found`**
 

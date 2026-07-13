@@ -59,9 +59,12 @@ def _ffmpeg_location() -> str | None:
 def _youtube_extractor_options() -> dict[str, Any]:
     """Shared yt-dlp options that pick resilient YouTube player clients.
 
-    YouTube blocks the default ``web`` client (HTTP 429), so we steer yt-dlp to
-    the Android client first. Applied to every ``extract_info`` call so metadata
-    listing, playlist expansion and downloads all use the working endpoint.
+    We pass a list of player clients (see ``DEFAULT_PLAYER_CLIENTS``): yt-dlp
+    tries each, merges the formats they return, and only fails if all of them
+    fail. This gives the full HD ladder from the ``default`` clients while
+    keeping ``android`` as a fallback for networks where YouTube bot-blocks the
+    web-family clients. Applied to every ``extract_info`` call so metadata
+    listing, playlist expansion and downloads all use the same clients.
     """
 
     return {

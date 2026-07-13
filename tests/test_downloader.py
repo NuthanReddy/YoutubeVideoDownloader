@@ -88,6 +88,24 @@ def test_build_options_include_resolution_and_subtitles(tmp_path):
     assert options["postprocessors"][1]["key"] == "FFmpegEmbedSubtitle"
 
 
+def test_build_options_uses_resilient_player_clients(tmp_path):
+    request = DownloadRequest(
+        url="https://example.com/watch?v=abc123",
+        output_dir=tmp_path,
+        download_subtitles=False,
+    )
+
+    service = DownloadService(ydl_factory=FakeYoutubeDL)
+    options = service.build_options(request)
+
+    clients = options["extractor_args"]["youtube"]["player_client"]
+    # ``default`` provides the HD ladder; ``android`` is the fallback that keeps
+    # downloads working when the web-family clients are bot-blocked.
+    assert "default" in clients
+    assert "android" in clients
+    assert clients.index("default") < clients.index("android")
+
+
 def test_build_options_sets_ffmpeg_location_when_available(tmp_path, monkeypatch):
     monkeypatch.setattr(
         downloader_module, "_ffmpeg_location", lambda: "/opt/ffmpeg_bin"

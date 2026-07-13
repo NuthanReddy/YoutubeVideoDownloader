@@ -11,13 +11,19 @@ DEFAULT_SUBTITLE_LANGUAGES = ("en",)
 DEFAULT_SUBTITLE_FORMAT = "srt/best"
 APP_NAME = "youtube-video-downloader"
 
-# yt-dlp YouTube "player clients" to try. Historically we pinned the ``android``
-# client because YouTube bot-blocked the ``web`` client (HTTP 429). YouTube has
-# since rolled out a "SABR-only" streaming experiment that strips the HD/DASH
-# formats from the ``android`` client for many videos/sessions, which silently
-# capped downloads at 360p. yt-dlp's maintained ``default`` client set now
-# negotiates the working endpoints and restores the full 2160p/1440p/1080p
-# ladder, so we defer to it rather than pinning a single client.
-DEFAULT_PLAYER_CLIENTS = ("default",)
+# yt-dlp YouTube "player clients" to try, in order. This list is deliberately
+# resilient: yt-dlp queries each client, aggregates the formats they return, and
+# only fails if *every* client fails.
+#
+# - ``default`` lets yt-dlp use its maintained client set, which exposes the full
+#   HD/4K (DASH) ladder. This is what restores 1080p/1440p/2160p downloads.
+# - ``android`` is kept as a fallback. In some networks/sessions YouTube
+#   bot-blocks the web-family clients that ``default`` leads with (HTTP 429 ->
+#   "This video is not available"), which would make every download fail. The
+#   android endpoint uses a different API that is usually still reachable, so it
+#   keeps downloads working (at up to 360p, since android is SABR-restricted)
+#   instead of erroring out entirely. Where ``default`` succeeds, its HD formats
+#   win the format selection and android's lower formats are simply ignored.
+DEFAULT_PLAYER_CLIENTS = ("default", "android")
 # Extra extraction attempts before giving up (helps ride out transient 429s).
 DEFAULT_EXTRACTOR_RETRIES = 3
