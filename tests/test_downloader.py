@@ -77,7 +77,6 @@ def test_build_options_include_resolution_and_subtitles(tmp_path):
         subtitle_languages=("en", "hi"),
         download_subtitles=True,
         embed_subtitles=True,
-        concurrent_fragments=4,
     )
 
     service = DownloadService(ydl_factory=FakeYoutubeDL)
@@ -86,7 +85,6 @@ def test_build_options_include_resolution_and_subtitles(tmp_path):
     assert options["format"] == "bestvideo*[height<=1080]+bestaudio/best[height<=1080]/best"
     assert options["writesubtitles"] is True
     assert options["writeautomaticsub"] is True
-    assert options["concurrent_fragment_downloads"] == 4
     assert options["subtitleslangs"] == ["en", "hi"]
     assert options["postprocessors"][0]["key"] == "FFmpegSubtitlesConvertor"
     assert options["postprocessors"][1]["key"] == "FFmpegEmbedSubtitle"
@@ -108,6 +106,95 @@ def test_build_options_uses_resilient_player_clients(tmp_path):
     assert "default" in clients
     assert "android" in clients
     assert clients.index("default") < clients.index("android")
+
+
+def test_build_options_includes_rate_limit_safety(tmp_path):
+    request = DownloadRequest(
+        url="https://example.com/watch?v=abc123",
+        output_dir=tmp_path,
+        download_subtitles=False,
+    )
+
+    service = DownloadService(ydl_factory=FakeYoutubeDL)
+    options = service.build_options(request)
+
+    # Throttling + backoff that keeps request rate under YouTube's 429 limit.
+    assert options["sleep_interval_requests"] == downloader_module.SLEEP_INTERVAL_REQUESTS
+    assert options["sleep_interval"] == downloader_module.MIN_SLEEP_INTERVAL
+    assert options["max_sleep_interval"] == downloader_module.MAX_SLEEP_INTERVAL
+    assert options["retries"] == downloader_module.DOWNLOAD_RETRIES
+    assert options["fragment_retries"] == downloader_module.FRAGMENT_RETRIES
+    assert options["extractor_retries"] == downloader_module.DEFAULT_EXTRACTOR_RETRIES
+    assert options["socket_timeout"] == downloader_module.DEFAULT_SOCKET_TIMEOUT
+    for key in ("http", "fragment", "extractor"):
+        assert options["retry_sleep_functions"][key] is downloader_module._retry_sleep
+
+
+def test_build_options_drops_concurrent_fragment_downloads(tmp_path):
+    request = DownloadRequest(
+        url="https://example.com/watch?v=abc123",
+        output_dir=tmp_path,
+        download_subtitles=False,
+    )
+
+    service = DownloadService(ydl_factory=FakeYoutubeDL)
+    options = service.build_options(request)
+
+    # Concurrent fragments multiply the request rate (429 risk) and were removed.
+    assert "concurrent_fragment_downloads" not in options
+
+
+def test_build_options_wires_js_runtime_when_available(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        downloader_module, "_resolve_js_runtimes", lambda: {"deno": {"path": "/opt/deno"}}
+    )
+    request = DownloadRequest(
+        url="https://example.com/watch?v=abc123",
+        output_dir=tmp_path,
+        download_subtitles=False,
+    )
+
+    service = DownloadService(ydl_factory=FakeYoutubeDL)
+    options = service.build_options(request)
+
+    # A JS runtime lets yt-dlp solve YouTube's ``n`` challenge -> HD formats.
+    assert options["js_runtimes"] == {"deno": {"path": "/opt/deno"}}
+
+
+def test_build_options_omits_js_runtime_when_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setattr(downloader_module, "_resolve_js_runtimes", lambda: {})
+    request = DownloadRequest(
+        url="https://example.com/watch?v=abc123",
+        output_dir=tmp_path,
+        download_subtitles=False,
+    )
+
+    service = DownloadService(ydl_factory=FakeYoutubeDL)
+    options = service.build_options(request)
+
+    # Nothing resolved -> leave yt-dlp's own default untouched.
+    assert "js_runtimes" not in options
+
+
+def test_retry_sleep_is_bounded_exponential_backoff():
+    base = downloader_module.RETRY_BACKOFF_BASE_SECONDS
+    cap = downloader_module.RETRY_BACKOFF_MAX_SECONDS
+
+    assert downloader_module._retry_sleep(1) == base
+    assert downloader_module._retry_sleep(2) == base * 2
+    assert downloader_module._retry_sleep(3) == base * 4
+    # Grows without bound in theory, but is capped so retries never sleep forever.
+    assert downloader_module._retry_sleep(1000) == cap
+
+
+def test_deno_location_resolves_bundled_binary(tmp_path, monkeypatch):
+    deno_dir = tmp_path / "deno_bin"
+    deno_dir.mkdir()
+    binary = "deno.exe" if downloader_module.os.name == "nt" else "deno"
+    (deno_dir / binary).write_text("deno", encoding="utf-8")
+    monkeypatch.setattr(downloader_module.sys, "_MEIPASS", str(tmp_path), raising=False)
+
+    assert downloader_module._deno_location() == str(deno_dir / binary)
 
 
 def test_build_options_sets_ffmpeg_location_when_available(tmp_path, monkeypatch):
@@ -461,3 +548,102 @@ def test_harden_runtime_paths_drops_untraversable_entries(monkeypatch):
     assert bad not in entries
     assert good_first in entries
     assert good_last in entries
+
+
+# ---------------------------------------------------------------------------
+# Sign-in cookies support
+# ---------------------------------------------------------------------------
+
+
+def test_build_options_injects_cookies_file(tmp_path):
+    cookies = tmp_path / "cookies.txt"
+    cookies.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+    request = DownloadRequest(
+        url="https://example.com/watch?v=abc123",
+        output_dir=tmp_path,
+        download_subtitles=False,
+    )
+
+    service = DownloadService(ydl_factory=FakeYoutubeDL, cookies_file=str(cookies))
+    options = service.build_options(request)
+
+    assert options["cookiefile"] == str(cookies)
+    assert "cookiesfrombrowser" not in options
+
+
+def test_build_options_injects_cookies_from_browser(tmp_path):
+    request = DownloadRequest(
+        url="https://example.com/watch?v=abc123",
+        output_dir=tmp_path,
+        download_subtitles=False,
+    )
+
+    service = DownloadService(
+        ydl_factory=FakeYoutubeDL, cookies_from_browser="Edge:Default"
+    )
+    options = service.build_options(request)
+
+    assert options["cookiesfrombrowser"] == ("edge", "Default", None, None)
+
+
+def test_list_formats_passes_cookies_into_ydl(tmp_path):
+    cookies = tmp_path / "cookies.txt"
+    cookies.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+    service = DownloadService(ydl_factory=FakeYoutubeDL, cookies_file=str(cookies))
+
+    service.list_formats("https://example.com/watch?v=abc123")
+
+    assert FakeYoutubeDL.last_options["cookiefile"] == str(cookies)
+
+
+def test_build_options_omits_cookies_when_absent(tmp_path):
+    request = DownloadRequest(
+        url="https://example.com/watch?v=abc123",
+        output_dir=tmp_path,
+        download_subtitles=False,
+    )
+
+    service = DownloadService(ydl_factory=FakeYoutubeDL)
+    options = service.build_options(request)
+
+    assert "cookiefile" not in options
+    assert "cookiesfrombrowser" not in options
+
+
+def test_normalize_browser_spec_rejects_unknown_browser():
+    with pytest.raises(downloader_module.CookiesError):
+        downloader_module.normalize_browser_spec("netscape")
+
+
+def test_normalize_browser_spec_parses_profile():
+    assert downloader_module.normalize_browser_spec("chrome") == (
+        "chrome",
+        None,
+        None,
+        None,
+    )
+    assert downloader_module.normalize_browser_spec("  Firefox : work ") == (
+        "firefox",
+        "work",
+        None,
+        None,
+    )
+    assert downloader_module.normalize_browser_spec("  ") is None
+
+
+def test_humanize_youtube_error_adds_hints():
+    drm = downloader_module.humanize_youtube_error("This video is DRM protected")
+    assert "DRM-protected" in drm
+
+    signin = downloader_module.humanize_youtube_error(
+        "Sign in to confirm you're not a bot"
+    )
+    assert "cookies" in signin.lower()
+
+    locked = downloader_module.humanize_youtube_error(
+        "ERROR: Could not copy Chrome cookie database."
+    )
+    assert "close the browser" in locked.lower()
+
+    plain = downloader_module.humanize_youtube_error("Some unrelated error")
+    assert plain == "Some unrelated error"

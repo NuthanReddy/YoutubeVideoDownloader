@@ -13,7 +13,8 @@ and a local library manager.
 - Subtitle download, automatic (generated) subtitles, and optional embedding (uses the bundled `ffmpeg` in the desktop apps)
 - Per-video output folders (`<title> [<id>]`) containing media and subtitle files
 - Parallel playlist downloads with a configurable worker count (CLI and GUI)
-- Per-video concurrent fragment downloads for DASH/HLS streams
+- Automatic **HD/4K unlock** — a JavaScript runtime (Deno) is bundled in the desktop apps so YouTube's signature challenge is solved and the full HD/4K format ladder is returned instead of a 360p cap (see [Troubleshooting](#troubleshooting))
+- Built-in **rate-limit safety** — request throttling, randomized sleeps and exponential-backoff retries keep traffic under YouTube's per-IP limit to avoid `HTTP 429` failures (see [Troubleshooting](#troubleshooting))
 - Resilient extraction that defers to yt-dlp's maintained **default player clients** so the full HD/4K format ladder stays available (see [Troubleshooting](#troubleshooting))
 - **`ffmpeg` bundled** in the packaged desktop apps, so HD merges and subtitle embedding work with no separate install
 - **Region-block bypass** — an optional toggle that, when a video is blocked in your country, automatically retries through a free proxy in an allowed country (or your own pinned proxy/VPN endpoint) — see [Region-restricted videos](#region-restricted-videos-uploader-country-blocks)
@@ -101,12 +102,6 @@ Download every video in a playlist in parallel:
 uv run youtube-video-downloader download "https://www.youtube.com/playlist?list=PLAYLIST_ID" --playlist --playlist-workers 4 --resolution 1080 --subtitle-lang en
 ```
 
-Use parallel fragments to speed up a single DASH/HLS video:
-
-```powershell
-uv run youtube-video-downloader download "https://www.youtube.com/watch?v=VIDEO_ID" --resolution 2160 --concurrent-fragments 4
-```
-
 Inspect available formats before downloading:
 
 ```powershell
@@ -132,7 +127,6 @@ Run with the local interpreter directly (equivalent to `uv run`):
 | `--embed-subtitles / --sidecar-subtitles` | embed | Embed subtitles into media (needs `ffmpeg`) or keep sidecar files |
 | `--playlist / --single` | single | Treat the URL as a playlist and download all videos |
 | `--playlist-workers` | `3` | Parallel workers for playlist downloads |
-| `--concurrent-fragments` | `1` | Concurrent fragment downloads per video |
 | `--proxy` | none | Route downloads through a proxy, e.g. `http://host:port` or `socks5://host:port` |
 | `--geo-unblock / --no-geo-unblock` | off | If a video is region-blocked, retry through free proxies in allowed countries |
 | `--restrict-filenames / --allow-unicode-filenames` | unicode | Use ASCII-safe filenames |
@@ -171,7 +165,24 @@ A few defaults live in `src/youtube_video_downloader/config.py`:
     working (capped at ~360p, since android is caught by YouTube's "SABR-only"
     experiment) instead of failing outright. Where `default` succeeds, its HD
     formats win and android's lower formats are ignored.
-- `DEFAULT_EXTRACTOR_RETRIES` — extra extraction attempts to ride out transient errors.
+- **Rate-limit safety** (always on) — to stay under YouTube's per-IP limit and
+  avoid `HTTP 429`, the app spaces out requests and retries transient failures
+  with exponential backoff. Tunables: `SLEEP_INTERVAL_REQUESTS` (pause between
+  the extraction calls that resolve each video), `MIN_SLEEP_INTERVAL` /
+  `MAX_SLEEP_INTERVAL` (randomized pause before each download),
+  `DOWNLOAD_RETRIES` / `FRAGMENT_RETRIES` / `DEFAULT_EXTRACTOR_RETRIES` (retry
+  budgets), `RETRY_BACKOFF_BASE_SECONDS` / `RETRY_BACKOFF_MAX_SECONDS`
+  (backoff curve) and `DEFAULT_SOCKET_TIMEOUT` (bounds a stalled connection).
+  *(The old per-video "concurrent fragments" option was removed — parallel
+  fragments multiply the request rate and are a primary 429 trigger, and the
+  worker count already parallelizes across videos.)*
+- **JavaScript runtime** — modern YouTube requires a JS runtime to solve its
+  signature (`n`) challenge before it returns HD/DASH URLs; without one, formats
+  cap at ~360p or the video looks "not available". The desktop apps **bundle
+  Deno** plus the [`yt-dlp-ejs`](https://pypi.org/project/yt-dlp-ejs/) solver
+  scripts, so HD works offline out of the box. When running from source, the app
+  auto-detects a runtime on your `PATH` (`deno`, `node`, `bun`, or `quickjs`) —
+  installing [Deno](https://deno.com/) or Node.js is enough.
 - `DEFAULT_FILENAME_TEMPLATE` / `PLAYLIST_ITEM_FILENAME_TEMPLATE` — output naming.
 - `DEFAULT_SUBTITLE_LANGUAGES` / `DEFAULT_SUBTITLE_FORMAT` — subtitle defaults.
 - Region-block bypass tunables — `FREE_PROXY_API_URL`, `PREFERRED_PROXY_COUNTRIES`,
@@ -182,7 +193,10 @@ A few defaults live in `src/youtube_video_downloader/config.py`:
 
 **"This video is not available" / `HTTP Error 429: Too Many Requests`**
 
-YouTube is rate-limiting or bot-blocking extraction. If it happens:
+YouTube is rate-limiting or bot-blocking extraction. The app already throttles
+requests and retries with exponential backoff to stay under the limit (see
+[Rate-limit safety](#configuration)), but a shared IP or a very large batch can
+still trip it. If it happens:
 
 - Wait a few minutes for the rate limit to clear, then retry (use the GUI **Retry** button).
 - Lower the worker count (GUI `Workers` spinner or `--playlist-workers`) so fewer requests hit YouTube at once.
@@ -193,15 +207,23 @@ YouTube is rate-limiting or bot-blocking extraction. If it happens:
 
 **Downloads only ever reach 360p (never HD/4K)**
 
-That means the `default` clients are being blocked in your network and every
-download is falling back to the SABR-restricted `android` client. Try again on a
-different network/VPN, wait for the rate limit to clear, or update yt-dlp. When
-`default` is reachable the full 2160p ladder returns automatically.
+Modern YouTube only returns HD/DASH URLs after a JavaScript runtime solves its
+signature (`n`) challenge. The desktop apps bundle **Deno** + the `yt-dlp-ejs`
+solver scripts, so this is handled automatically. If you see a 360p cap:
+
+- **Running from source without a runtime** — install [Deno](https://deno.com/)
+  (or Node.js) so the app can solve the challenge; it auto-detects `deno`,
+  `node`, `bun`, or `quickjs` on your `PATH`.
+- **The `default` clients are blocked** in your network, so every download falls
+  back to the SABR-restricted `android` client. Try a different network/VPN, wait
+  for the rate limit to clear, or update yt-dlp.
 
 **4K reverts to 360p on the packaged app**
 
-Older releases capped at 360p for two reasons, both fixed in current builds:
+Older releases capped at 360p for three reasons, all fixed in current builds:
 
+- **No JavaScript runtime** — YouTube's `n`-challenge went unsolved, so HD/DASH
+  URLs were never returned. The apps now bundle Deno + `yt-dlp-ejs`.
 - **`ffmpeg` missing** — without it, yt-dlp can't merge separate video/audio
   streams and falls back to the best *pre-muxed* progressive stream (360p). The
   desktop apps now bundle `ffmpeg`; when running from source, install it and put
@@ -211,9 +233,10 @@ Older releases capped at 360p for two reasons, both fixed in current builds:
 
 **`WARNING: No supported JavaScript runtime could be found`**
 
-Some player clients increasingly need a JS runtime (Deno). The warning is usually
-harmless — yt-dlp falls back to another client. Installing [Deno](https://deno.com/)
-removes it entirely.
+yt-dlp needs a JS runtime to solve YouTube's `n`-challenge for HD formats. The
+desktop apps bundle Deno, so you should not see this. When running from source,
+install [Deno](https://deno.com/) (or Node.js) and it will be picked up
+automatically.
 
 **Merged video/audio or embedded subtitles are missing**
 
@@ -297,6 +320,7 @@ Notes:
 
 - PyInstaller does not cross-compile; build on Windows for the `.exe` folder and on macOS for the `.app`.
 - `ffmpeg` is bundled automatically (via `imageio-ffmpeg` in the `build` dependency group), so the packaged app needs no separate `ffmpeg` install.
+- **Deno** (the JavaScript runtime that unlocks HD/4K) is downloaded per-architecture and bundled during the build, together with the `yt-dlp-ejs` solver scripts — the packaged app solves YouTube's signature challenge offline, no runtime install needed. The build script fetches Deno from GitHub, so it needs network access.
 - You can also trigger `.github/workflows/build-desktop.yml` (GitHub Actions) to produce all
   release artifacts in one run: a **Windows** installer (`YouTubeVideoDownloader-Setup.exe`, built
   with Inno Setup from `installer/windows_installer.iss`), a **Windows** portable zip, a

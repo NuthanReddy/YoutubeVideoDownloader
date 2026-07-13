@@ -6,16 +6,37 @@ Run with uv so the build dependency group is resolved automatically:
 
 from __future__ import annotations
 
+import io
 import platform
 import shutil
 import subprocess
 import sys
+import time
+import urllib.request
+import zipfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 ENTRY_SCRIPT = ROOT / "src" / "youtube_video_downloader" / "gui_main.py"
 APP_NAME = "YouTubeVideoDownloader"
+
+# Deno is bundled so packaged apps have the JavaScript runtime that YouTube's
+# ``n``-signature challenge needs; without it yt-dlp only sees pre-muxed <=360p
+# streams (or "video not available"). Pinned to a known-good release for
+# reproducible CI builds. Paired with the bundled ``yt-dlp-ejs`` solver scripts
+# (``--collect-all yt_dlp_ejs``) Deno runs fully offline via its minified core
+# script -- no npm, no network at solve time.
+DENO_VERSION = "v2.9.2"
+_DENO_ASSETS = {
+    ("windows", "amd64"): "deno-x86_64-pc-windows-msvc.zip",
+    ("windows", "x86_64"): "deno-x86_64-pc-windows-msvc.zip",
+    ("darwin", "arm64"): "deno-aarch64-apple-darwin.zip",
+    ("darwin", "aarch64"): "deno-aarch64-apple-darwin.zip",
+    ("darwin", "x86_64"): "deno-x86_64-apple-darwin.zip",
+    ("linux", "x86_64"): "deno-x86_64-unknown-linux-gnu.zip",
+    ("linux", "amd64"): "deno-x86_64-unknown-linux-gnu.zip",
+}
 
 
 def _platform_suffix() -> str:
@@ -62,6 +83,69 @@ def _stage_ffmpeg(stage_dir: Path, is_windows: bool) -> Path | None:
     return target
 
 
+def _stage_deno(stage_dir: Path, is_windows: bool) -> Path:
+    """Download the arch-matched Deno binary and stage it for bundling.
+
+    Selects the Deno release asset that matches the interpreter PyInstaller is
+    freezing (so the frozen app ships a runnable binary on each CI target),
+    downloads and extracts it, and returns the path to the ``deno`` executable.
+
+    Raises on failure -- a build without Deno would silently regress packaged
+    apps back to a 360p cap, so we fail loudly rather than ship that.
+    """
+
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    asset = _DENO_ASSETS.get((system, machine))
+    if asset is None:
+        raise RuntimeError(
+            f"No known Deno release asset for {system}/{machine}; "
+            "add it to _DENO_ASSETS in scripts/build_desktop_app.py."
+        )
+
+    url = (
+        f"https://github.com/denoland/deno/releases/download/{DENO_VERSION}/{asset}"
+    )
+    stage_dir.mkdir(parents=True, exist_ok=True)
+
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            print(f"Downloading Deno {DENO_VERSION} ({asset}) [attempt {attempt}/3]...")
+            with urllib.request.urlopen(url, timeout=120) as response:
+                payload = response.read()
+            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                binary_name = "deno.exe" if is_windows else "deno"
+                member = next(
+                    (
+                        name
+                        for name in archive.namelist()
+                        if Path(name).name == binary_name
+                    ),
+                    None,
+                )
+                if member is None:
+                    raise RuntimeError(
+                        f"'{binary_name}' not found in Deno archive {asset}"
+                    )
+                target = stage_dir / binary_name
+                with archive.open(member) as src, open(target, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+            if not is_windows:
+                target.chmod(0o755)
+            print(f"Staged Deno: {url} -> {target}")
+            return target
+        except Exception as error:  # noqa: BLE001 - retried, then re-raised below
+            last_error = error
+            print(f"WARNING: Deno download failed: {error}", file=sys.stderr)
+            time.sleep(2 * attempt)
+
+    raise RuntimeError(
+        f"Failed to download Deno {DENO_VERSION} for {system}/{machine} "
+        f"after 3 attempts: {last_error}"
+    )
+
+
 def build() -> int:
     dist_path = ROOT / "dist" / _platform_suffix()
     build_path = ROOT / "build" / _platform_suffix()
@@ -73,6 +157,7 @@ def build() -> int:
     icon_icns = ROOT / "assets" / "app_icon.icns"
 
     ffmpeg_binary = _stage_ffmpeg(build_path / "ffmpeg_stage", is_windows)
+    deno_binary = _stage_deno(build_path / "deno_stage", is_windows)
 
     command = [
         sys.executable,
@@ -92,6 +177,10 @@ def build() -> int:
         str(build_path),
         "--collect-submodules",
         "yt_dlp",
+        "--collect-data",
+        "yt_dlp",
+        "--collect-all",
+        "yt_dlp_ejs",
         "--add-data",
         f"{icon_png}{data_sep}assets",
         "--add-data",
@@ -105,6 +194,8 @@ def build() -> int:
 
     if ffmpeg_binary is not None:
         command[-1:-1] = ["--add-binary", f"{ffmpeg_binary}{data_sep}ffmpeg_bin"]
+
+    command[-1:-1] = ["--add-binary", f"{deno_binary}{data_sep}deno_bin"]
 
     if is_windows:
         command.extend(["--icon", str(icon_ico)])

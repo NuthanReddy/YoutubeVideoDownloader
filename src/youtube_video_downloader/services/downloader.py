@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import functools
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -20,8 +22,17 @@ except Exception:  # pragma: no cover - very old yt-dlp
 from ..config import (
     DEFAULT_EXTRACTOR_RETRIES,
     DEFAULT_PLAYER_CLIENTS,
+    DEFAULT_SOCKET_TIMEOUT,
+    DOWNLOAD_RETRIES,
+    FRAGMENT_RETRIES,
     MAX_AUTO_PROXY_ATTEMPTS,
+    MAX_SLEEP_INTERVAL,
+    MIN_SLEEP_INTERVAL,
     PROXY_SOCKET_TIMEOUT,
+    RETRY_BACKOFF_BASE_SECONDS,
+    RETRY_BACKOFF_MAX_SECONDS,
+    SLEEP_INTERVAL_REQUESTS,
+    SUPPORTED_COOKIE_BROWSERS,
 )
 from ..models import DownloadRequest, DownloadResult, FormatInfo
 from . import proxy_provider
@@ -170,15 +181,233 @@ def _ffmpeg_location() -> str | None:
     return None
 
 
-def _youtube_extractor_options(proxy: str | None = None) -> dict[str, Any]:
-    """Shared yt-dlp options that pick resilient YouTube player clients.
+# --- JavaScript runtime for YouTube's ``n`` challenge -----------------------
+# Modern YouTube requires solving a JavaScript ``n``-signature challenge to hand
+# out the HD/DASH format URLs. yt-dlp needs a JS runtime for this, but only
+# *enables* Deno by default -- and end users rarely have Deno (or any runtime)
+# enabled, so extractions silently cap at 360p or fail with "video not
+# available". We ship the ``yt-dlp-ejs`` solver scripts (a dependency) and
+# resolve a runtime ourselves, enabling it explicitly via the ``js_runtimes``
+# option so the full ladder (up to 1080p+) works out of the box -- no cookies
+# required.
 
-    We pass a list of player clients (see ``DEFAULT_PLAYER_CLIENTS``): yt-dlp
-    tries each, merges the formats they return, and only fails if all of them
-    fail. This gives the full HD ladder from the ``default`` clients while
-    keeping ``android`` as a fallback for networks where YouTube bot-blocks the
-    web-family clients. Applied to every ``extract_info`` call so metadata
-    listing, playlist expansion and downloads all use the same clients.
+# Preference order. Deno first: it is yt-dlp's default-trusted, *sandboxed*
+# runtime and the one we bundle with the packaged app. node/bun/quickjs are
+# supported but run JS unsandboxed, so they are only used when already present on
+# a developer's PATH (source/dev runs). Each entry maps the yt-dlp provider name
+# to the executable name(s) to probe on PATH.
+_JS_RUNTIME_EXECUTABLES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("deno", ("deno",)),
+    ("node", ("node", "nodejs")),
+    ("bun", ("bun",)),
+    ("quickjs", ("qjs", "quickjs")),
+)
+
+
+def _deno_location() -> str | None:
+    """Return the path to a Deno binary bundled beside the frozen app, or None.
+
+    Mirrors :func:`_ffmpeg_location`: a Deno binary shipped in
+    ``sys._MEIPASS/deno_bin`` lets packaged-app users get the JS runtime
+    YouTube's challenge needs without installing anything. Deno is used because
+    it is sandboxed and, with the bundled ``yt-dlp-ejs`` scripts, runs fully
+    offline.
+    """
+
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        binary = "deno.exe" if os.name == "nt" else "deno"
+        candidate = Path(base) / "deno_bin" / binary
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+@functools.lru_cache(maxsize=1)
+def _resolve_js_runtimes() -> dict[str, dict[str, Any]]:
+    """Pick a JS runtime for yt-dlp to solve YouTube's ``n`` challenge.
+
+    Resolution order:
+
+    1. A Deno binary bundled with the frozen app -> ``{"deno": {"path": ...}}``.
+    2. Otherwise the first supported runtime found on ``PATH``
+       (deno/node/bun/quickjs) -> ``{"<name>": {}}`` (covers source/dev runs).
+    3. Nothing available -> ``{}`` (leave yt-dlp's default untouched).
+
+    Cached: neither the frozen bundle nor ``PATH`` changes during a run, and the
+    lookup runs on every extraction.
+    """
+
+    bundled = _deno_location()
+    if bundled:
+        return {"deno": {"path": bundled}}
+
+    for name, executables in _JS_RUNTIME_EXECUTABLES:
+        if any(shutil.which(exe) for exe in executables):
+            return {name: {}}
+
+    return {}
+
+
+def _js_runtime_options() -> dict[str, Any]:
+    """yt-dlp ``js_runtimes`` option enabling a resolved runtime (or empty)."""
+
+    runtimes = _resolve_js_runtimes()
+    return {"js_runtimes": runtimes} if runtimes else {}
+
+
+def _retry_sleep(attempts: int) -> float:
+    """Exponential backoff (seconds) for retry ``attempts`` (1-based).
+
+    ``min(base * 2**(n-1), max)`` -> 2s, 4s, 8s, ... capped, so repeated 429s
+    wait progressively longer instead of retrying instantly.
+    """
+
+    delay = RETRY_BACKOFF_BASE_SECONDS * (2 ** (max(int(attempts), 1) - 1))
+    return min(delay, RETRY_BACKOFF_MAX_SECONDS)
+
+
+def _rate_limit_options() -> dict[str, Any]:
+    """yt-dlp options that keep request rate under YouTube's per-IP 429 limit.
+
+    YouTube throttles by IP and returns HTTP 429 ("Too Many Requests") for
+    bursty traffic, which yt-dlp then surfaces as "video not available". We
+    cannot raise the limit, so we stay under it: sleep briefly between the
+    extraction requests that resolve each video, pause a randomized interval
+    before each download, cap connection time, and retry transient failures with
+    exponential backoff. Always applied; negligible for a single video but it
+    prevents 429s across a playlist.
+    """
+
+    return {
+        "sleep_interval_requests": SLEEP_INTERVAL_REQUESTS,
+        "sleep_interval": MIN_SLEEP_INTERVAL,
+        "max_sleep_interval": MAX_SLEEP_INTERVAL,
+        "retries": DOWNLOAD_RETRIES,
+        "fragment_retries": FRAGMENT_RETRIES,
+        "extractor_retries": DEFAULT_EXTRACTOR_RETRIES,
+        "socket_timeout": DEFAULT_SOCKET_TIMEOUT,
+        "retry_sleep_functions": {
+            "http": _retry_sleep,
+            "fragment": _retry_sleep,
+            "extractor": _retry_sleep,
+        },
+    }
+
+
+class CookiesError(ValueError):
+    """Raised when the sign-in cookies configuration is invalid."""
+
+
+def normalize_cookies_file(value: "str | os.PathLike[str] | None") -> Path | None:
+    """Return an expanded ``Path`` to a cookies.txt file, or ``None`` if blank."""
+
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return Path(text).expanduser()
+
+
+def normalize_browser_spec(
+    value: str | None,
+) -> tuple[str, str | None, str | None, str | None] | None:
+    """Parse a browser cookie spec into yt-dlp's ``cookiesfrombrowser`` tuple.
+
+    Accepts ``"edge"`` or ``"edge:ProfileName"`` (browser name is
+    case-insensitive). Returns ``(browser, profile, keyring, container)`` — the
+    shape yt-dlp expects — or ``None`` when the value is blank. Raises
+    :class:`CookiesError` for an unsupported browser name so the GUI/CLI can
+    show a friendly message instead of a raw yt-dlp traceback.
+    """
+
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    browser, _, profile = text.partition(":")
+    browser = browser.strip().lower()
+    profile = profile.strip() or None
+    if browser not in SUPPORTED_COOKIE_BROWSERS:
+        supported = ", ".join(SUPPORTED_COOKIE_BROWSERS)
+        raise CookiesError(
+            f"Unsupported cookies browser {browser!r}. Choose one of: {supported}."
+        )
+    return (browser, profile, None, None)
+
+
+def humanize_youtube_error(message: str) -> str:
+    """Append actionable guidance to common YouTube extraction errors.
+
+    yt-dlp's raw messages ("Requested format is not available", "This video is
+    DRM protected", "Sign in to confirm…") are opaque to end users. We keep the
+    original text and add a short hint pointing at the cookies/sign-in feature
+    or explaining DRM, so the GUI/CLI failure line is self-explanatory.
+    """
+
+    lowered = message.lower()
+    hint: str | None = None
+    if "drm" in lowered:
+        hint = (
+            "This video's high-resolution streams are DRM-protected and cannot "
+            "be downloaded by any tool; only non-DRM copies (often up to 360p) "
+            "are available."
+        )
+    elif "could not copy" in lowered and "cookie" in lowered:
+        hint = (
+            "Couldn't read your browser's cookies — the browser is likely open "
+            "and locking its cookie database (and Chrome/Edge encrypt it). Close "
+            "the browser and retry, or export a cookies.txt file and use the "
+            "cookies.txt field instead."
+        )
+    elif any(
+        signal in lowered
+        for signal in (
+            "sign in",
+            "log in",
+            "not a bot",
+            "confirm your age",
+            "age-restricted",
+            "private video",
+            "members-only",
+            "join this channel",
+            "account cookies",
+        )
+    ):
+        hint = (
+            "YouTube wants a signed-in session for this video. Turn on 'Use "
+            "browser sign-in (cookies)' and pick your browser, or supply a "
+            "cookies.txt file, then try again."
+        )
+    elif "requested format is not available" in lowered:
+        hint = (
+            "YouTube returned no downloadable formats right now (its SABR "
+            "streaming experiment). Try again in a moment, or sign in with "
+            "cookies to unlock the full format list."
+        )
+    if hint:
+        return f"{message}\n\nHint: {hint}"
+    return message
+
+
+def _youtube_extractor_options(proxy: str | None = None) -> dict[str, Any]:
+    """Shared yt-dlp options applied to every ``extract_info`` call.
+
+    Bundles three concerns so metadata listing, playlist expansion and downloads
+    all behave consistently:
+
+    * **Resilient player clients** (see ``DEFAULT_PLAYER_CLIENTS``): yt-dlp tries
+      each, merges the formats they return, and only fails if all of them fail --
+      the ``default`` clients give the full HD ladder while ``android`` is a
+      fallback for networks where the web clients are bot-blocked.
+    * **Rate-limit safety** (see :func:`_rate_limit_options`): throttling +
+      exponential-backoff retries that keep the request rate under YouTube's
+      per-IP 429 limit.
+    * **A JavaScript runtime** (see :func:`_js_runtime_options`): enables the
+      runtime that solves YouTube's ``n`` challenge so HD/DASH formats are
+      exposed instead of capping at 360p.
 
     When ``proxy`` is provided (e.g. ``socks5://127.0.0.1:1080`` or
     ``http://user:pass@host:port``) every request is routed through it, which is
@@ -189,7 +418,8 @@ def _youtube_extractor_options(proxy: str | None = None) -> dict[str, Any]:
         "extractor_args": {
             "youtube": {"player_client": list(DEFAULT_PLAYER_CLIENTS)}
         },
-        "extractor_retries": DEFAULT_EXTRACTOR_RETRIES,
+        **_rate_limit_options(),
+        **_js_runtime_options(),
     }
     if proxy:
         options["proxy"] = proxy
@@ -197,8 +427,43 @@ def _youtube_extractor_options(proxy: str | None = None) -> dict[str, Any]:
 
 
 class DownloadService:
-    def __init__(self, ydl_factory: Callable[..., Any] | None = None) -> None:
+    def __init__(
+        self,
+        ydl_factory: Callable[..., Any] | None = None,
+        *,
+        cookies_file: "str | os.PathLike[str] | None" = None,
+        cookies_from_browser: str | None = None,
+    ) -> None:
         self._ydl_factory = ydl_factory or yt_dlp.YoutubeDL
+        self._cookies_file = normalize_cookies_file(cookies_file)
+        self._cookies_from_browser = normalize_browser_spec(cookies_from_browser)
+
+    def set_cookies(
+        self,
+        *,
+        cookies_file: "str | os.PathLike[str] | None" = None,
+        cookies_from_browser: str | None = None,
+    ) -> None:
+        """Set the sign-in cookies applied to every extraction and download.
+
+        ``cookies_file`` is a path to a Netscape ``cookies.txt``;
+        ``cookies_from_browser`` is a browser name (optionally ``browser:profile``)
+        yt-dlp imports cookies from. Either or both may be blank/``None`` to
+        clear. Raises :class:`CookiesError` for an unsupported browser name.
+        """
+
+        self._cookies_file = normalize_cookies_file(cookies_file)
+        self._cookies_from_browser = normalize_browser_spec(cookies_from_browser)
+
+    def _cookie_options(self) -> dict[str, Any]:
+        """yt-dlp options carrying the configured sign-in cookies (if any)."""
+
+        options: dict[str, Any] = {}
+        if self._cookies_file is not None:
+            options["cookiefile"] = str(self._cookies_file)
+        if self._cookies_from_browser is not None:
+            options["cookiesfrombrowser"] = self._cookies_from_browser
+        return options
 
     def build_options(self, request: DownloadRequest) -> dict[str, Any]:
         options: dict[str, Any] = {
@@ -208,8 +473,8 @@ class DownloadService:
             "noplaylist": True,
             "restrictfilenames": request.restrict_filenames,
             "merge_output_format": "mp4",
-            "concurrent_fragment_downloads": request.concurrent_fragments,
             **_youtube_extractor_options(request.proxy),
+            **self._cookie_options(),
         }
 
         if request.download_subtitles:
@@ -260,7 +525,7 @@ class DownloadService:
             geo_blocked = _is_geo_restricted_error(str(exc))
             can_auto = request.geo_unblock and not request.proxy and geo_blocked
             if not can_auto:
-                raise
+                raise DownloadError(humanize_youtube_error(str(exc))) from exc
             first_error = exc
 
         return self._download_via_auto_proxy(
@@ -414,13 +679,14 @@ class DownloadService:
             "skip_download": True,
             "noplaylist": True,
             **_youtube_extractor_options(proxy),
+            **self._cookie_options(),
         }
 
         try:
             with self._ydl_factory(options) as ydl:
                 info = ydl.extract_info(url, download=False)
         except Exception as exc:  # pragma: no cover - library/network dependent
-            raise DownloadError(str(exc)) from exc
+            raise DownloadError(humanize_youtube_error(str(exc))) from exc
 
         formats = info.get("formats") or []
         entries = [self._to_format_info(item) for item in formats]
@@ -449,6 +715,7 @@ class DownloadService:
             "extract_flat": True,
             "noplaylist": False,
             **_youtube_extractor_options(proxy),
+            **self._cookie_options(),
         }
 
         try:

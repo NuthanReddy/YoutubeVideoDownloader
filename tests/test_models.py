@@ -54,20 +54,3 @@ def test_download_request_disables_embed_when_subtitles_are_disabled():
 
     assert request.subtitle_languages == ()
     assert request.embed_subtitles is False
-
-
-def test_download_request_normalizes_concurrent_fragments_to_int():
-    request = DownloadRequest(
-        url="https://example.com/watch?v=123",
-        concurrent_fragments="4",
-    )
-
-    assert request.concurrent_fragments == 4
-
-
-def test_download_request_rejects_invalid_concurrent_fragments():
-    with pytest.raises(ValueError):
-        DownloadRequest(
-            url="https://example.com/watch?v=123",
-            concurrent_fragments=0,
-        )

@@ -39,8 +39,6 @@ def test_download_command_passes_normalized_request(monkeypatch, tmp_path):
             "EN",
             "--subtitle-lang",
             "hi",
-            "--concurrent-fragments",
-            "4",
         ],
     )
 
@@ -49,7 +47,6 @@ def test_download_command_passes_normalized_request(monkeypatch, tmp_path):
     assert request.resolution == 1080
     assert request.output_dir == Path(tmp_path)
     assert request.subtitle_languages == ("en", "hi")
-    assert request.concurrent_fragments == 4
     assert "Download completed." in result.stdout
 
 

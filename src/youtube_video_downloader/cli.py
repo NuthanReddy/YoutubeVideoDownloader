@@ -102,14 +102,6 @@ def download(
             help="Number of parallel workers used when downloading playlist videos.",
         ),
     ] = 3,
-    concurrent_fragments: Annotated[
-        int,
-        typer.Option(
-            "--concurrent-fragments",
-            min=1,
-            help="Concurrent fragment downloads per video (helps DASH/HLS streams).",
-        ),
-    ] = 1,
     proxy: Annotated[
         str | None,
         typer.Option(
@@ -124,6 +116,20 @@ def download(
             help="If a video is region-blocked, retry through free proxies in allowed countries.",
         ),
     ] = False,
+    cookies: Annotated[
+        str | None,
+        typer.Option(
+            "--cookies",
+            help="Path to a Netscape cookies.txt for a signed-in session (age/members-only/private).",
+        ),
+    ] = None,
+    cookies_from_browser: Annotated[
+        str | None,
+        typer.Option(
+            "--cookies-from-browser",
+            help="Import cookies from a browser, e.g. 'edge' or 'chrome:Default' (close the browser first).",
+        ),
+    ] = None,
  ) -> None:
     """Download a single YouTube video."""
 
@@ -143,11 +149,13 @@ def download(
             auto_subtitles=auto_subtitles,
             embed_subtitles=embed_subtitles,
             restrict_filenames=restrict_filenames,
-            concurrent_fragments=concurrent_fragments,
             proxy=proxy,
             geo_unblock=geo_unblock,
         )
-        service = DownloadService()
+        service = DownloadService(
+            cookies_file=cookies,
+            cookies_from_browser=cookies_from_browser,
+        )
 
         if playlist:
             video_urls = service.list_playlist_video_urls(url, proxy=proxy)
@@ -170,7 +178,6 @@ def download(
                             auto_subtitles=auto_subtitles,
                             embed_subtitles=embed_subtitles,
                             restrict_filenames=restrict_filenames,
-                            concurrent_fragments=concurrent_fragments,
                             proxy=proxy,
                             geo_unblock=geo_unblock,
                         ),
@@ -238,11 +245,32 @@ def formats(
             help="Route the metadata request through a proxy, e.g. socks5://host:port.",
         ),
     ] = None,
+    cookies: Annotated[
+        str | None,
+        typer.Option(
+            "--cookies",
+            help="Path to a Netscape cookies.txt to list formats as a signed-in user.",
+        ),
+    ] = None,
+    cookies_from_browser: Annotated[
+        str | None,
+        typer.Option(
+            "--cookies-from-browser",
+            help="Import cookies from a browser, e.g. 'edge' or 'chrome:Default'.",
+        ),
+    ] = None,
 ) -> None:
     """List the formats that yt-dlp reports for a YouTube video."""
 
     try:
-        format_entries = DownloadService().list_formats(url, proxy=proxy)
+        service = DownloadService(
+            cookies_file=cookies,
+            cookies_from_browser=cookies_from_browser,
+        )
+        format_entries = service.list_formats(url, proxy=proxy)
+    except ValueError as exc:
+        typer.secho(f"Configuration error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
     except DownloadError as exc:
         typer.secho(f"Could not fetch formats: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
@@ -285,13 +313,33 @@ def gui(
             help="Prefill the GUI 'Bypass region block' toggle as enabled.",
         ),
     ] = False,
+    cookies: Annotated[
+        str | None,
+        typer.Option(
+            "--cookies",
+            help="Prefill the GUI cookies.txt field for a signed-in session.",
+        ),
+    ] = None,
+    cookies_from_browser: Annotated[
+        str | None,
+        typer.Option(
+            "--cookies-from-browser",
+            help="Prefill the GUI 'Sign-in browser' dropdown, e.g. 'edge' or 'chrome'.",
+        ),
+    ] = None,
 ) -> None:
     """Launch the desktop GUI."""
 
     # Import lazily so environments without Tk still allow CLI-only usage.
     from .gui import launch_gui
 
-    launch_gui(output_dir=output_dir, proxy=proxy or "", geo_unblock=geo_unblock)
+    launch_gui(
+        output_dir=output_dir,
+        proxy=proxy or "",
+        geo_unblock=geo_unblock,
+        cookies_file=cookies or "",
+        cookies_from_browser=cookies_from_browser or "",
+    )
 
 
 def main() -> None:
