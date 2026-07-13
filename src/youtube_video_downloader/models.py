@@ -46,8 +46,6 @@ class DownloadRequest:
     subtitle_format: str = DEFAULT_SUBTITLE_FORMAT
     output_template: str = DEFAULT_FILENAME_TEMPLATE
     restrict_filenames: bool = False
-    proxy: str | None = None
-    geo_unblock: bool = False
 
     def __post_init__(self) -> None:
         normalized_url = self.url.strip()
@@ -69,10 +67,6 @@ class DownloadRequest:
 
         if not self.download_subtitles and self.embed_subtitles:
             object.__setattr__(self, "embed_subtitles", False)
-
-        # Normalize the optional proxy: treat blank/whitespace as "no proxy".
-        normalized_proxy = (self.proxy or "").strip() or None
-        object.__setattr__(self, "proxy", normalized_proxy)
 
 
 @dataclass(slots=True, frozen=True)

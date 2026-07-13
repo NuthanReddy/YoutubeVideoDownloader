@@ -102,34 +102,6 @@ def download(
             help="Number of parallel workers used when downloading playlist videos.",
         ),
     ] = 3,
-    proxy: Annotated[
-        str | None,
-        typer.Option(
-            "--proxy",
-            help="Route downloads through a proxy, e.g. http://host:port or socks5://host:port.",
-        ),
-    ] = None,
-    geo_unblock: Annotated[
-        bool,
-        typer.Option(
-            "--geo-unblock/--no-geo-unblock",
-            help="If a video is region-blocked, retry through free proxies in allowed countries.",
-        ),
-    ] = False,
-    cookies: Annotated[
-        str | None,
-        typer.Option(
-            "--cookies",
-            help="Path to a Netscape cookies.txt for a signed-in session (age/members-only/private).",
-        ),
-    ] = None,
-    cookies_from_browser: Annotated[
-        str | None,
-        typer.Option(
-            "--cookies-from-browser",
-            help="Import cookies from a browser, e.g. 'edge' or 'chrome:Default' (close the browser first).",
-        ),
-    ] = None,
  ) -> None:
     """Download a single YouTube video."""
 
@@ -149,16 +121,11 @@ def download(
             auto_subtitles=auto_subtitles,
             embed_subtitles=embed_subtitles,
             restrict_filenames=restrict_filenames,
-            proxy=proxy,
-            geo_unblock=geo_unblock,
         )
-        service = DownloadService(
-            cookies_file=cookies,
-            cookies_from_browser=cookies_from_browser,
-        )
+        service = DownloadService()
 
         if playlist:
-            video_urls = service.list_playlist_video_urls(url, proxy=proxy)
+            video_urls = service.list_playlist_video_urls(url)
             if not video_urls:
                 raise DownloadError("No playlist videos were found.")
 
@@ -178,8 +145,6 @@ def download(
                             auto_subtitles=auto_subtitles,
                             embed_subtitles=embed_subtitles,
                             restrict_filenames=restrict_filenames,
-                            proxy=proxy,
-                            geo_unblock=geo_unblock,
                         ),
                     ): video_url
                     for video_url in video_urls
@@ -238,36 +203,12 @@ def download(
 @app.command("formats")
 def formats(
     url: Annotated[str, typer.Argument(help="The YouTube video URL to inspect.")],
-    proxy: Annotated[
-        str | None,
-        typer.Option(
-            "--proxy",
-            help="Route the metadata request through a proxy, e.g. socks5://host:port.",
-        ),
-    ] = None,
-    cookies: Annotated[
-        str | None,
-        typer.Option(
-            "--cookies",
-            help="Path to a Netscape cookies.txt to list formats as a signed-in user.",
-        ),
-    ] = None,
-    cookies_from_browser: Annotated[
-        str | None,
-        typer.Option(
-            "--cookies-from-browser",
-            help="Import cookies from a browser, e.g. 'edge' or 'chrome:Default'.",
-        ),
-    ] = None,
 ) -> None:
     """List the formats that yt-dlp reports for a YouTube video."""
 
     try:
-        service = DownloadService(
-            cookies_file=cookies,
-            cookies_from_browser=cookies_from_browser,
-        )
-        format_entries = service.list_formats(url, proxy=proxy)
+        service = DownloadService()
+        format_entries = service.list_formats(url)
     except ValueError as exc:
         typer.secho(f"Configuration error: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
@@ -299,47 +240,13 @@ def gui(
             help="Directory where downloaded files will be stored and managed.",
         ),
     ] = DEFAULT_OUTPUT_DIR,
-    proxy: Annotated[
-        str | None,
-        typer.Option(
-            "--proxy",
-            help="Prefill the GUI proxy field, e.g. http://host:port or socks5://host:port.",
-        ),
-    ] = None,
-    geo_unblock: Annotated[
-        bool,
-        typer.Option(
-            "--geo-unblock/--no-geo-unblock",
-            help="Prefill the GUI 'Bypass region block' toggle as enabled.",
-        ),
-    ] = False,
-    cookies: Annotated[
-        str | None,
-        typer.Option(
-            "--cookies",
-            help="Prefill the GUI cookies.txt field for a signed-in session.",
-        ),
-    ] = None,
-    cookies_from_browser: Annotated[
-        str | None,
-        typer.Option(
-            "--cookies-from-browser",
-            help="Prefill the GUI 'Sign-in browser' dropdown, e.g. 'edge' or 'chrome'.",
-        ),
-    ] = None,
 ) -> None:
     """Launch the desktop GUI."""
 
     # Import lazily so environments without Tk still allow CLI-only usage.
     from .gui import launch_gui
 
-    launch_gui(
-        output_dir=output_dir,
-        proxy=proxy or "",
-        geo_unblock=geo_unblock,
-        cookies_file=cookies or "",
-        cookies_from_browser=cookies_from_browser or "",
-    )
+    launch_gui(output_dir=output_dir)
 
 
 def main() -> None:

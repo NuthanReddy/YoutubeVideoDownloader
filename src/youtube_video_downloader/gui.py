@@ -22,7 +22,6 @@ from .config import (
     DEFAULT_OUTPUT_DIR,
     DEFAULT_SUBTITLE_LANGUAGES,
     PLAYLIST_ITEM_FILENAME_TEMPLATE,
-    SUPPORTED_COOKIE_BROWSERS,
 )
 from .models import (
     DownloadRequest,
@@ -33,7 +32,7 @@ from .models import (
     normalize_resolution,
     normalize_subtitle_languages,
 )
-from .services.downloader import CookiesError, DownloadError, DownloadService
+from .services.downloader import DownloadError, DownloadService
 
 try:  # Used to abort in-flight yt-dlp downloads when the queue is stopped.
     from yt_dlp.utils import DownloadCancelled as _DownloadCancelled
@@ -213,11 +212,6 @@ class DownloaderGUI:
         self,
         root: tk.Tk,
         output_dir: Path = DEFAULT_OUTPUT_DIR,
-        *,
-        proxy: str = "",
-        geo_unblock: bool = False,
-        cookies_file: str = "",
-        cookies_from_browser: str = "",
     ) -> None:
         _set_windows_app_id()
         self.root = root
@@ -240,16 +234,6 @@ class DownloaderGUI:
         self.embed_subtitles_var = tk.BooleanVar(value=True)
         self.expand_playlists_var = tk.BooleanVar(value=True)
         self.url_mode_var = tk.StringVar(value="single")
-        # Region-block bypass: when on and no proxy is pinned, a geo-blocked video
-        # is retried through free proxies in allowed countries. The proxy box lets
-        # the user pin their own proxy/VPN endpoint for a reliable route.
-        self.geo_unblock_var = tk.BooleanVar(value=geo_unblock)
-        self.proxy_var = tk.StringVar(value=proxy)
-        # Sign-in cookies: unlock age-restricted/members-only/private videos and
-        # extra format tiers only offered to authenticated users. Either a
-        # cookies.txt file or a browser to import cookies from.
-        self.cookies_file_var = tk.StringVar(value=cookies_file)
-        self.cookies_browser_var = tk.StringVar(value=cookies_from_browser)
         self._urls_hint_active = False
 
         self._queue: Queue[tuple[str, Any]] = Queue()
@@ -681,62 +665,6 @@ class DownloaderGUI:
             side=tk.LEFT
         )
 
-        # Region-block bypass row: a simple toggle that routes region-blocked
-        # videos through a proxy in an allowed country, plus an optional field to
-        # pin your own proxy/VPN for reliability.
-        net_row = ttk.Frame(controls)
-        net_row.pack(fill=tk.X, pady=(10, 0))
-        ttk.Checkbutton(
-            net_row,
-            text="Bypass region block",
-            variable=self.geo_unblock_var,
-        ).pack(side=tk.LEFT)
-        ttk.Label(net_row, text="Proxy", width=7, anchor=tk.E).pack(
-            side=tk.LEFT, padx=(16, 0)
-        )
-        ttk.Entry(net_row, textvariable=self.proxy_var, width=30).pack(
-            side=tk.LEFT, padx=(8, 0)
-        )
-        ttk.Label(
-            net_row,
-            text="blank = auto  ·  or http/https/socks5://host:port",
-            style="Muted.TLabel",
-        ).pack(side=tk.LEFT, padx=(8, 0))
-
-        # Sign-in cookies row: unlock age-restricted / members-only / private
-        # videos and higher format tiers that YouTube only serves to an
-        # authenticated session. A cookies.txt file is the reliable route;
-        # importing from a running browser can fail on Windows (locked cookie
-        # database / app-bound encryption), so we offer both.
-        cookies_row = ttk.Frame(controls)
-        cookies_row.pack(fill=tk.X, pady=(10, 0))
-        ttk.Label(cookies_row, text="Sign-in", width=7, anchor=tk.W).pack(side=tk.LEFT)
-        ttk.Label(cookies_row, text="Browser").pack(side=tk.LEFT)
-        self.cookies_browser_combo = ttk.Combobox(
-            cookies_row,
-            textvariable=self.cookies_browser_var,
-            values=("", *SUPPORTED_COOKIE_BROWSERS),
-            state="readonly",
-            width=10,
-        )
-        self.cookies_browser_combo.pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Label(cookies_row, text="or cookies.txt").pack(side=tk.LEFT, padx=(16, 0))
-        ttk.Entry(cookies_row, textvariable=self.cookies_file_var, width=26).pack(
-            side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 8)
-        )
-        ttk.Button(
-            cookies_row, text="Browse", command=self._choose_cookies_file
-        ).pack(side=tk.LEFT)
-        ttk.Label(
-            controls,
-            text=(
-                "Sign-in is only needed for restricted videos or to unlock higher "
-                "tiers. cookies.txt is most reliable; close the browser first if "
-                "importing directly. DRM-protected HD can't be downloaded."
-            ),
-            style="Muted.TLabel",
-        ).pack(fill=tk.X, pady=(4, 0))
-
         # --- Actions ----------------------------------------------------
         actions = ttk.Frame(main)
         actions.pack(fill=tk.X, pady=(12, 0))
@@ -923,17 +851,6 @@ class DownloaderGUI:
         if selected:
             self.output_dir_var.set(selected)
             self.refresh_downloads_tree()
-
-    def _choose_cookies_file(self) -> None:
-        current = (self.cookies_file_var.get() or "").strip()
-        initial_dir = str(Path(current).expanduser().parent) if current else str(Path.home())
-        selected = filedialog.askopenfilename(
-            title="Select cookies.txt",
-            initialdir=initial_dir,
-            filetypes=[("Cookies (Netscape)", "*.txt"), ("All files", "*.*")],
-        )
-        if selected:
-            self.cookies_file_var.set(selected)
 
     def _refresh_controls(self) -> None:
         """Sync the Start / Pause / Resume-All buttons and the status label to the
@@ -1261,37 +1178,17 @@ class DownloaderGUI:
         self.resolution_var.set(ordered[0])
         self._append_log(f"Loaded resolutions: {', '.join(ordered)}")
 
-        # Proactive sign-in hint: when only low resolutions come back and the user
-        # hasn't supplied cookies, the missing HD tiers are almost always gated
-        # behind a signed-in session (or are DRM-only). Surface that instead of
-        # silently showing 360p and leaving the user wondering where 1080p went.
-        heights = [int(value) for value in values if value.isdigit()]
-        max_height = max(heights) if heights else 0
-        has_cookies = bool(
-            self._current_cookies_file() or self._current_cookies_browser()
-        )
-        if max_height and max_height <= 360 and not has_cookies:
-            self._append_log(
-                f"Only ≤{max_height}p is available anonymously for this video. "
-                "Higher tiers usually need sign-in — add a cookies.txt or pick "
-                "your browser in the Sign-in row, then Fetch Resolutions again. "
-                "(Truly DRM-protected HD can't be downloaded by any tool.)"
-            )
-
     def fetch_resolutions(self) -> None:
         url = self.url_var.get().strip() or self._first_url_from_queue()
         if not url:
             messagebox.showerror("Missing URL", "Provide a URL or paste URLs in the queue box.")
             return
 
-        if not self._apply_cookies_to_service():
-            return
-
         self._append_log(f"Fetching available resolutions for: {url}")
 
         def worker() -> None:
             try:
-                formats = self.service.list_formats(url, proxy=self._current_proxy())
+                formats = self.service.list_formats(url)
                 heights = sorted(
                     {
                         str(value)
@@ -1347,7 +1244,7 @@ class DownloaderGUI:
         for candidate in urls:
             try:
                 playlist_name, playlist_urls = self.service.expand_playlist(
-                    candidate, proxy=self._current_proxy()
+                    candidate
                 )
             except DownloadError as exc:
                 self._append_log(f"Playlist expansion failed for {candidate}: {exc}")
@@ -1400,51 +1297,7 @@ class DownloaderGUI:
             download_subtitles=self.enable_subtitles_var.get(),
             auto_subtitles=self.auto_subtitles_var.get(),
             embed_subtitles=self.embed_subtitles_var.get(),
-            proxy=self._current_proxy(),
-            geo_unblock=self.geo_unblock_var.get(),
         )
-
-    def _current_proxy(self) -> str | None:
-        """Return the pinned proxy URL, or ``None`` when the field is blank."""
-
-        return (self.proxy_var.get() or "").strip() or None
-
-    def _current_cookies_file(self) -> str:
-        return (self.cookies_file_var.get() or "").strip()
-
-    def _current_cookies_browser(self) -> str:
-        return (self.cookies_browser_var.get() or "").strip()
-
-    def _apply_cookies_to_service(self) -> bool:
-        """Push the current sign-in cookie settings onto the shared service.
-
-        Called before any extraction/download so ``list_formats``,
-        ``expand_playlist`` and ``download`` all use the same cookies. Returns
-        ``False`` (after showing an error) when the browser name is invalid so
-        callers can abort; ``True`` otherwise. Also warns if a cookies.txt path
-        was typed but does not exist, which is the most common footgun.
-        """
-
-        cookies_file = self._current_cookies_file()
-        browser = self._current_cookies_browser()
-        if cookies_file and not Path(cookies_file).expanduser().is_file():
-            messagebox.showerror(
-                "Cookies file not found",
-                f"The cookies file does not exist:\n{cookies_file}",
-            )
-            return False
-        try:
-            self.service.set_cookies(
-                cookies_file=cookies_file or None,
-                cookies_from_browser=browser or None,
-            )
-        except CookiesError as exc:
-            messagebox.showerror("Invalid sign-in browser", str(exc))
-            return False
-        if cookies_file or browser:
-            source = cookies_file if cookies_file else f"{browser} browser"
-            self._append_log(f"Using sign-in cookies from {source}.")
-        return True
 
     def _halt_executor(self) -> None:
         """Cancel in-flight and queued jobs. .part files are preserved so a later
@@ -1489,9 +1342,6 @@ class DownloaderGUI:
         urls = self._collect_urls()
         if not urls:
             messagebox.showerror("Missing URLs", "Provide at least one URL to download.")
-            return
-
-        if not self._apply_cookies_to_service():
             return
 
         candidates = self._expand_playlist_urls(urls)
@@ -1745,21 +1595,7 @@ class DownloaderGUI:
         self.root.destroy()
 
 
-def launch_gui(
-    output_dir: Path = DEFAULT_OUTPUT_DIR,
-    *,
-    proxy: str = "",
-    geo_unblock: bool = False,
-    cookies_file: str = "",
-    cookies_from_browser: str = "",
-) -> None:
+def launch_gui(output_dir: Path = DEFAULT_OUTPUT_DIR) -> None:
     root = tk.Tk()
-    DownloaderGUI(
-        root,
-        output_dir=output_dir,
-        proxy=proxy,
-        geo_unblock=geo_unblock,
-        cookies_file=cookies_file,
-        cookies_from_browser=cookies_from_browser,
-    )
+    DownloaderGUI(root, output_dir=output_dir)
     root.mainloop()

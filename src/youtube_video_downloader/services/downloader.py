@@ -25,17 +25,13 @@ from ..config import (
     DEFAULT_SOCKET_TIMEOUT,
     DOWNLOAD_RETRIES,
     FRAGMENT_RETRIES,
-    MAX_AUTO_PROXY_ATTEMPTS,
     MAX_SLEEP_INTERVAL,
     MIN_SLEEP_INTERVAL,
-    PROXY_SOCKET_TIMEOUT,
     RETRY_BACKOFF_BASE_SECONDS,
     RETRY_BACKOFF_MAX_SECONDS,
     SLEEP_INTERVAL_REQUESTS,
-    SUPPORTED_COOKIE_BROWSERS,
 )
 from ..models import DownloadRequest, DownloadResult, FormatInfo
-from . import proxy_provider
 
 # --- Disable yt-dlp's optional plugin discovery -----------------------------
 # The first time a YoutubeDL is constructed, yt-dlp scans sys.path, the current
@@ -116,33 +112,6 @@ class DownloadError(RuntimeError):
     """Raised when yt-dlp cannot complete the request."""
 
 
-# Substrings that identify a YouTube uploader/geo region block. Matched
-# case-insensitively against the yt-dlp error text to decide whether the
-# "bypass region block" proxy fallback should kick in.
-_GEO_BLOCK_MARKERS = (
-    "available in your country",
-    "not available in your country",
-    "blocked it in your country",
-    "geo restricted",
-    "geo-restricted",
-    "georestrictederror",
-    "who has blocked it on copyright grounds",
-)
-
-
-def _is_geo_restricted_error(message: str) -> bool:
-    lowered = message.lower()
-    return any(marker in lowered for marker in _GEO_BLOCK_MARKERS)
-
-
-def _emit(status_callback: Callable[[str], None] | None, message: str) -> None:
-    if status_callback is not None:
-        try:
-            status_callback(message)
-        except Exception:  # pragma: no cover - logging must never break a download
-            pass
-
-
 def _ffmpeg_location() -> str | None:
     """Locate an ffmpeg binary for yt-dlp's merge/embed post-processing.
 
@@ -188,8 +157,7 @@ def _ffmpeg_location() -> str | None:
 # enabled, so extractions silently cap at 360p or fail with "video not
 # available". We ship the ``yt-dlp-ejs`` solver scripts (a dependency) and
 # resolve a runtime ourselves, enabling it explicitly via the ``js_runtimes``
-# option so the full ladder (up to 1080p+) works out of the box -- no cookies
-# required.
+# option so the full ladder (up to 1080p+) works out of the box.
 
 # Preference order. Deno first: it is yt-dlp's default-trusted, *sandboxed*
 # runtime and the one we bundle with the packaged app. node/bun/quickjs are
@@ -295,57 +263,8 @@ def _rate_limit_options() -> dict[str, Any]:
     }
 
 
-class CookiesError(ValueError):
-    """Raised when the sign-in cookies configuration is invalid."""
-
-
-def normalize_cookies_file(value: "str | os.PathLike[str] | None") -> Path | None:
-    """Return an expanded ``Path`` to a cookies.txt file, or ``None`` if blank."""
-
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    return Path(text).expanduser()
-
-
-def normalize_browser_spec(
-    value: str | None,
-) -> tuple[str, str | None, str | None, str | None] | None:
-    """Parse a browser cookie spec into yt-dlp's ``cookiesfrombrowser`` tuple.
-
-    Accepts ``"edge"`` or ``"edge:ProfileName"`` (browser name is
-    case-insensitive). Returns ``(browser, profile, keyring, container)`` — the
-    shape yt-dlp expects — or ``None`` when the value is blank. Raises
-    :class:`CookiesError` for an unsupported browser name so the GUI/CLI can
-    show a friendly message instead of a raw yt-dlp traceback.
-    """
-
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    browser, _, profile = text.partition(":")
-    browser = browser.strip().lower()
-    profile = profile.strip() or None
-    if browser not in SUPPORTED_COOKIE_BROWSERS:
-        supported = ", ".join(SUPPORTED_COOKIE_BROWSERS)
-        raise CookiesError(
-            f"Unsupported cookies browser {browser!r}. Choose one of: {supported}."
-        )
-    return (browser, profile, None, None)
-
-
 def humanize_youtube_error(message: str) -> str:
-    """Append actionable guidance to common YouTube extraction errors.
-
-    yt-dlp's raw messages ("Requested format is not available", "This video is
-    DRM protected", "Sign in to confirm…") are opaque to end users. We keep the
-    original text and add a short hint pointing at the cookies/sign-in feature
-    or explaining DRM, so the GUI/CLI failure line is self-explanatory.
-    """
+    """Append a short, actionable hint to common opaque YouTube errors."""
 
     lowered = message.lower()
     hint: str | None = None
@@ -354,13 +273,6 @@ def humanize_youtube_error(message: str) -> str:
             "This video's high-resolution streams are DRM-protected and cannot "
             "be downloaded by any tool; only non-DRM copies (often up to 360p) "
             "are available."
-        )
-    elif "could not copy" in lowered and "cookie" in lowered:
-        hint = (
-            "Couldn't read your browser's cookies — the browser is likely open "
-            "and locking its cookie database (and Chrome/Edge encrypt it). Close "
-            "the browser and retry, or export a cookies.txt file and use the "
-            "cookies.txt field instead."
         )
     elif any(
         signal in lowered
@@ -373,97 +285,46 @@ def humanize_youtube_error(message: str) -> str:
             "private video",
             "members-only",
             "join this channel",
-            "account cookies",
         )
     ):
         hint = (
-            "YouTube wants a signed-in session for this video. Turn on 'Use "
-            "browser sign-in (cookies)' and pick your browser, or supply a "
-            "cookies.txt file, then try again."
+            "YouTube requires a signed-in session for this video "
+            "(age-restricted, private, or members-only), so it can't be "
+            "downloaded anonymously."
         )
     elif "requested format is not available" in lowered:
         hint = (
             "YouTube returned no downloadable formats right now (its SABR "
-            "streaming experiment). Try again in a moment, or sign in with "
-            "cookies to unlock the full format list."
+            "streaming experiment). Try again in a moment."
         )
     if hint:
         return f"{message}\n\nHint: {hint}"
     return message
 
 
-def _youtube_extractor_options(proxy: str | None = None) -> dict[str, Any]:
-    """Shared yt-dlp options applied to every ``extract_info`` call.
+def _youtube_extractor_options() -> dict[str, Any]:
+    """Shared yt-dlp options for every ``extract_info`` call.
 
-    Bundles three concerns so metadata listing, playlist expansion and downloads
-    all behave consistently:
-
-    * **Resilient player clients** (see ``DEFAULT_PLAYER_CLIENTS``): yt-dlp tries
-      each, merges the formats they return, and only fails if all of them fail --
-      the ``default`` clients give the full HD ladder while ``android`` is a
-      fallback for networks where the web clients are bot-blocked.
-    * **Rate-limit safety** (see :func:`_rate_limit_options`): throttling +
-      exponential-backoff retries that keep the request rate under YouTube's
-      per-IP 429 limit.
-    * **A JavaScript runtime** (see :func:`_js_runtime_options`): enables the
-      runtime that solves YouTube's ``n`` challenge so HD/DASH formats are
-      exposed instead of capping at 360p.
-
-    When ``proxy`` is provided (e.g. ``socks5://127.0.0.1:1080`` or
-    ``http://user:pass@host:port``) every request is routed through it, which is
-    the reliable way to reach videos the uploader has geo-restricted.
+    Bundles the three concerns that keep metadata listing, playlist expansion
+    and downloads consistent: resilient player clients (``DEFAULT_PLAYER_CLIENTS``
+    -- ``default`` gives the full HD ladder, ``android`` is a bot-block
+    fallback), rate-limit safety (:func:`_rate_limit_options`) and a JavaScript
+    runtime (:func:`_js_runtime_options`) to solve YouTube's ``n`` challenge so
+    HD/DASH formats are exposed instead of capping at 360p.
     """
 
-    options: dict[str, Any] = {
+    return {
         "extractor_args": {
             "youtube": {"player_client": list(DEFAULT_PLAYER_CLIENTS)}
         },
         **_rate_limit_options(),
         **_js_runtime_options(),
     }
-    if proxy:
-        options["proxy"] = proxy
-    return options
 
 
 class DownloadService:
-    def __init__(
-        self,
-        ydl_factory: Callable[..., Any] | None = None,
-        *,
-        cookies_file: "str | os.PathLike[str] | None" = None,
-        cookies_from_browser: str | None = None,
-    ) -> None:
+    def __init__(self, ydl_factory: Callable[..., Any] | None = None) -> None:
         self._ydl_factory = ydl_factory or yt_dlp.YoutubeDL
-        self._cookies_file = normalize_cookies_file(cookies_file)
-        self._cookies_from_browser = normalize_browser_spec(cookies_from_browser)
-
-    def set_cookies(
-        self,
-        *,
-        cookies_file: "str | os.PathLike[str] | None" = None,
-        cookies_from_browser: str | None = None,
-    ) -> None:
-        """Set the sign-in cookies applied to every extraction and download.
-
-        ``cookies_file`` is a path to a Netscape ``cookies.txt``;
-        ``cookies_from_browser`` is a browser name (optionally ``browser:profile``)
-        yt-dlp imports cookies from. Either or both may be blank/``None`` to
-        clear. Raises :class:`CookiesError` for an unsupported browser name.
-        """
-
-        self._cookies_file = normalize_cookies_file(cookies_file)
-        self._cookies_from_browser = normalize_browser_spec(cookies_from_browser)
-
-    def _cookie_options(self) -> dict[str, Any]:
-        """yt-dlp options carrying the configured sign-in cookies (if any)."""
-
-        options: dict[str, Any] = {}
-        if self._cookies_file is not None:
-            options["cookiefile"] = str(self._cookies_file)
-        if self._cookies_from_browser is not None:
-            options["cookiesfrombrowser"] = self._cookies_from_browser
-        return options
 
     def build_options(self, request: DownloadRequest) -> dict[str, Any]:
         options: dict[str, Any] = {
@@ -473,8 +334,7 @@ class DownloadService:
             "noplaylist": True,
             "restrictfilenames": request.restrict_filenames,
             "merge_output_format": "mp4",
-            **_youtube_extractor_options(request.proxy),
-            **self._cookie_options(),
+            **_youtube_extractor_options(),
         }
 
         if request.download_subtitles:
@@ -505,50 +365,28 @@ class DownloadService:
         status_callback: Callable[[str], None] | None = None,
         is_cancelled: Callable[[], bool] | None = None,
     ) -> DownloadResult:
-        """Download ``request``, transparently routing around region blocks.
+        """Download ``request`` and return its :class:`DownloadResult`.
 
-        Normal flow: attempt the download directly (using a pinned proxy if the
-        request carries one). If that fails with a *geo-restriction* error and
-        the request opted into ``geo_unblock`` without a pinned proxy, retry the
-        same video through free proxies located in allowed countries until one
-        works. ``status_callback`` receives human-readable progress lines and
-        ``is_cancelled`` lets the caller abort the proxy hunt between attempts.
+        ``status_callback``/``is_cancelled`` are accepted for caller
+        compatibility; cancellation is driven through ``progress_hook`` (which
+        raises :class:`DownloadCancelled`).
         """
 
         request.output_dir.mkdir(parents=True, exist_ok=True)
-
         try:
             return self._download_once(request, progress_hook=progress_hook)
         except DownloadCancelled:
             raise
         except DownloadError as exc:
-            geo_blocked = _is_geo_restricted_error(str(exc))
-            can_auto = request.geo_unblock and not request.proxy and geo_blocked
-            if not can_auto:
-                raise DownloadError(humanize_youtube_error(str(exc))) from exc
-            first_error = exc
-
-        return self._download_via_auto_proxy(
-            request,
-            progress_hook=progress_hook,
-            status_callback=status_callback,
-            is_cancelled=is_cancelled,
-            first_error=first_error,
-        )
+            raise DownloadError(humanize_youtube_error(str(exc))) from exc
 
     def _download_once(
         self,
         request: DownloadRequest,
         *,
-        proxy: str | None = None,
-        socket_timeout: int | None = None,
         progress_hook: Callable[[dict[str, Any]], None] | None = None,
     ) -> DownloadResult:
         options = self.build_options(request)
-        if proxy:
-            options["proxy"] = proxy
-        if socket_timeout:
-            options["socket_timeout"] = socket_timeout
         if progress_hook is not None:
             options["progress_hooks"] = [progress_hook]
 
@@ -575,111 +413,12 @@ class DownloadService:
         except Exception as exc:  # pragma: no cover - library/network dependent
             raise DownloadError(str(exc)) from exc
 
-    def _download_via_auto_proxy(
-        self,
-        request: DownloadRequest,
-        *,
-        progress_hook: Callable[[dict[str, Any]], None] | None,
-        status_callback: Callable[[str], None] | None,
-        is_cancelled: Callable[[], bool] | None,
-        first_error: DownloadError,
-    ) -> DownloadResult:
-        """Retry a geo-blocked video through free proxies in allowed countries."""
-
-        _emit(
-            status_callback,
-            "Region-blocked - searching for a proxy in an allowed country...",
-        )
-
-        def cancelled() -> bool:
-            return bool(is_cancelled and is_cancelled())
-
-        attempts = 0
-        last_error: DownloadError = first_error
-        tried: set[str] = set()
-
-        # A proxy that already worked (e.g. for a sibling playlist item) is very
-        # likely to work again, so try it first to avoid re-scanning every time.
-        remembered = proxy_provider.get_remembered_proxy()
-        if remembered and not cancelled():
-            tried.add(remembered)
-            attempts += 1
-            _emit(status_callback, f"Trying last working proxy ({remembered})...")
-            try:
-                result = self._download_once(
-                    request,
-                    proxy=remembered,
-                    socket_timeout=PROXY_SOCKET_TIMEOUT,
-                    progress_hook=progress_hook,
-                )
-                proxy_provider.remember_good_proxy(remembered)
-                return result
-            except DownloadCancelled:
-                raise
-            except DownloadError as exc:
-                last_error = exc
-                proxy_provider.forget_proxy(remembered)
-
-        candidates = proxy_provider.fetch_proxy_candidates()
-        if not candidates and attempts == 0:
-            raise DownloadError(
-                "Region-blocked, and no free proxy could be fetched. Connect a "
-                "VPN, or paste your own proxy (http/https/socks5) in the Proxy "
-                f"field for a reliable route. Original error: {first_error}"
-            )
-
-        probes = 0
-        for candidate in candidates:
-            if cancelled():
-                raise DownloadCancelled()
-            if attempts >= MAX_AUTO_PROXY_ATTEMPTS:
-                break
-            if candidate.url in tried:
-                continue
-            # Bound how many dead proxies we probe so the hunt can't run forever.
-            if probes >= proxy_provider.AUTO_PROXY_CANDIDATE_POOL:
-                break
-            probes += 1
-            if not proxy_provider.proxy_is_live(candidate.url):
-                continue
-
-            tried.add(candidate.url)
-            attempts += 1
-            _emit(
-                status_callback,
-                f"Trying proxy {attempts}/{MAX_AUTO_PROXY_ATTEMPTS} via "
-                f"{candidate.country} ({candidate.url})...",
-            )
-            try:
-                result = self._download_once(
-                    request,
-                    proxy=candidate.url,
-                    socket_timeout=PROXY_SOCKET_TIMEOUT,
-                    progress_hook=progress_hook,
-                )
-                proxy_provider.remember_good_proxy(candidate.url)
-                _emit(status_callback, f"Proxy via {candidate.country} succeeded.")
-                return result
-            except DownloadCancelled:
-                raise
-            except DownloadError as exc:
-                last_error = exc
-                continue
-
-        raise DownloadError(
-            f"Region-blocked; tried {attempts} proxy/proxies in allowed "
-            "countries but none worked. Free proxies are unreliable - connect a "
-            "VPN or paste your own proxy in the Proxy field for a reliable "
-            f"route. Last error: {last_error}"
-        )
-
-    def list_formats(self, url: str, *, proxy: str | None = None) -> list[FormatInfo]:
+    def list_formats(self, url: str) -> list[FormatInfo]:
         options = {
             "quiet": True,
             "skip_download": True,
             "noplaylist": True,
-            **_youtube_extractor_options(proxy),
-            **self._cookie_options(),
+            **_youtube_extractor_options(),
         }
 
         try:
@@ -692,14 +431,12 @@ class DownloadService:
         entries = [self._to_format_info(item) for item in formats]
         return sorted(entries, key=lambda item: (item.height or 0, item.format_id), reverse=True)
 
-    def list_playlist_video_urls(self, url: str, *, proxy: str | None = None) -> list[str]:
+    def list_playlist_video_urls(self, url: str) -> list[str]:
         """Return individual video URLs when the input is a playlist URL."""
 
-        return self.expand_playlist(url, proxy=proxy)[1]
+        return self.expand_playlist(url)[1]
 
-    def expand_playlist(
-        self, url: str, *, proxy: str | None = None
-    ) -> tuple[str | None, list[str]]:
+    def expand_playlist(self, url: str) -> tuple[str | None, list[str]]:
         """Return ``(playlist_title, video_urls)`` for a URL.
 
         ``playlist_title`` is the playlist's name when ``url`` resolves to a
@@ -714,8 +451,7 @@ class DownloadService:
             "skip_download": True,
             "extract_flat": True,
             "noplaylist": False,
-            **_youtube_extractor_options(proxy),
-            **self._cookie_options(),
+            **_youtube_extractor_options(),
         }
 
         try:
