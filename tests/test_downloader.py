@@ -1,8 +1,12 @@
 from pathlib import Path
 
+import pytest
+
 from youtube_video_downloader.models import DownloadRequest
 from youtube_video_downloader.services import downloader as downloader_module
-from youtube_video_downloader.services.downloader import DownloadService
+from youtube_video_downloader.services import proxy_provider
+from youtube_video_downloader.services.downloader import DownloadError, DownloadService
+from youtube_video_downloader.services.proxy_provider import ProxyCandidate
 
 
 class FakeYoutubeDL:
@@ -237,3 +241,158 @@ def test_playlist_url_from_variants():
         normalize("https://example.com/watch?v=x&list=PLabc")
         == "https://example.com/watch?v=x&list=PLabc"
     )
+
+
+# ---------------------------------------------------------------------------
+# Region-block bypass (proxy) support
+# ---------------------------------------------------------------------------
+
+
+def test_build_options_injects_pinned_proxy(tmp_path):
+    request = DownloadRequest(
+        url="https://example.com/watch?v=abc123",
+        output_dir=tmp_path,
+        download_subtitles=False,
+        proxy="socks5://127.0.0.1:9050",
+    )
+
+    service = DownloadService(ydl_factory=FakeYoutubeDL)
+    options = service.build_options(request)
+
+    assert options["proxy"] == "socks5://127.0.0.1:9050"
+
+
+def test_build_options_omits_proxy_when_absent(tmp_path):
+    request = DownloadRequest(
+        url="https://example.com/watch?v=abc123",
+        output_dir=tmp_path,
+        download_subtitles=False,
+    )
+
+    service = DownloadService(ydl_factory=FakeYoutubeDL)
+    options = service.build_options(request)
+
+    assert "proxy" not in options
+
+
+def test_download_request_normalizes_blank_proxy(tmp_path):
+    request = DownloadRequest(
+        url="https://example.com/watch?v=abc123",
+        output_dir=tmp_path,
+        proxy="   ",
+    )
+    assert request.proxy is None
+
+    request = DownloadRequest(
+        url="https://example.com/watch?v=abc123",
+        output_dir=tmp_path,
+        proxy="  http://host:8080  ",
+    )
+    assert request.proxy == "http://host:8080"
+
+
+def test_is_geo_restricted_error_detects_uploader_block():
+    detect = downloader_module._is_geo_restricted_error
+    assert detect("ERROR: The uploader has not made this video available in your country")
+    assert detect("This video is geo restricted")
+    assert not detect("HTTP Error 429: Too Many Requests")
+    assert not detect("Video unavailable")
+
+
+class _GeoBlockingYoutubeDL(FakeYoutubeDL):
+    """Fails with a geo-block error unless a proxy is configured."""
+
+    proxies_seen: list = []
+
+    def extract_info(self, url, download):
+        _GeoBlockingYoutubeDL.proxies_seen.append(self.options.get("proxy"))
+        if download and not self.options.get("proxy"):
+            raise RuntimeError(
+                "ERROR: [youtube] abc123: The uploader has not made this "
+                "video available in your country"
+            )
+        return super().extract_info(url, download)
+
+
+@pytest.fixture(autouse=True)
+def _reset_remembered_proxy():
+    proxy_provider.forget_proxy(proxy_provider.get_remembered_proxy() or "")
+    yield
+    proxy_provider.forget_proxy(proxy_provider.get_remembered_proxy() or "")
+
+
+def test_auto_proxy_fallback_retries_via_free_proxy(tmp_path, monkeypatch):
+    _GeoBlockingYoutubeDL.proxies_seen = []
+    remembered: list[str] = []
+
+    monkeypatch.setattr(proxy_provider, "get_remembered_proxy", lambda: None)
+    monkeypatch.setattr(
+        proxy_provider,
+        "fetch_proxy_candidates",
+        lambda: [ProxyCandidate("http://1.2.3.4:8080", "US")],
+    )
+    monkeypatch.setattr(proxy_provider, "proxy_is_live", lambda url: True)
+    monkeypatch.setattr(
+        proxy_provider, "remember_good_proxy", lambda url: remembered.append(url)
+    )
+
+    request = DownloadRequest(
+        url="https://example.com/watch?v=abc123",
+        output_dir=tmp_path,
+        resolution=720,
+        geo_unblock=True,
+    )
+    service = DownloadService(ydl_factory=_GeoBlockingYoutubeDL)
+    messages: list[str] = []
+    result = service.download(request, status_callback=messages.append)
+
+    assert result.video_id == "abc123"
+    # First attempt has no proxy (fails), the retry carries the free proxy.
+    assert _GeoBlockingYoutubeDL.proxies_seen[0] is None
+    assert "http://1.2.3.4:8080" in _GeoBlockingYoutubeDL.proxies_seen
+    assert remembered == ["http://1.2.3.4:8080"]
+    assert any("proxy" in m.lower() for m in messages)
+
+
+def test_auto_proxy_not_used_without_geo_unblock(tmp_path, monkeypatch):
+    _GeoBlockingYoutubeDL.proxies_seen = []
+
+    def _boom():  # pragma: no cover - must never be called
+        raise AssertionError("proxy hunt should not start without geo_unblock")
+
+    monkeypatch.setattr(proxy_provider, "fetch_proxy_candidates", _boom)
+
+    request = DownloadRequest(
+        url="https://example.com/watch?v=abc123",
+        output_dir=tmp_path,
+        resolution=720,
+        geo_unblock=False,
+    )
+    service = DownloadService(ydl_factory=_GeoBlockingYoutubeDL)
+
+    with pytest.raises(DownloadError):
+        service.download(request)
+
+
+def test_pinned_proxy_skips_auto_hunt(tmp_path, monkeypatch):
+    _GeoBlockingYoutubeDL.proxies_seen = []
+
+    def _boom():  # pragma: no cover - must never be called
+        raise AssertionError("auto hunt should not run when a proxy is pinned")
+
+    monkeypatch.setattr(proxy_provider, "fetch_proxy_candidates", _boom)
+
+    request = DownloadRequest(
+        url="https://example.com/watch?v=abc123",
+        output_dir=tmp_path,
+        resolution=720,
+        geo_unblock=True,
+        proxy="http://9.9.9.9:3128",
+    )
+    service = DownloadService(ydl_factory=_GeoBlockingYoutubeDL)
+    result = service.download(request)
+
+    # The pinned proxy is applied on the very first attempt, so it succeeds
+    # immediately without ever fetching free proxy candidates.
+    assert result.video_id == "abc123"
+    assert _GeoBlockingYoutubeDL.proxies_seen == ["http://9.9.9.9:3128"]

@@ -11,7 +11,7 @@ runner = CliRunner()
 def test_download_command_passes_normalized_request(monkeypatch, tmp_path):
     captured = {}
 
-    def fake_download(self, request):
+    def fake_download(self, request, **kwargs):
         captured["request"] = request
         return DownloadResult(
             video_id="abc123",
@@ -71,7 +71,7 @@ def test_download_command_rejects_bad_resolution():
 def test_formats_command_prints_table(monkeypatch):
     from youtube_video_downloader.models import FormatInfo
 
-    def fake_list_formats(self, url):
+    def fake_list_formats(self, url, **kwargs):
         return [
             FormatInfo(
                 format_id="137",
@@ -100,7 +100,7 @@ def test_formats_command_prints_table(monkeypatch):
 def test_gui_command_invokes_launcher(monkeypatch, tmp_path):
     captured = {}
 
-    def fake_launch_gui(output_dir):
+    def fake_launch_gui(output_dir, **kwargs):
         captured["output_dir"] = output_dir
 
     monkeypatch.setattr("youtube_video_downloader.gui.launch_gui", fake_launch_gui)
@@ -114,13 +114,13 @@ def test_gui_command_invokes_launcher(monkeypatch, tmp_path):
 def test_download_playlist_mode_expands_urls(monkeypatch, tmp_path):
     captured_urls = []
 
-    def fake_playlist_urls(self, url):
+    def fake_playlist_urls(self, url, **kwargs):
         return [
             "https://example.com/watch?v=one",
             "https://example.com/watch?v=two",
         ]
 
-    def fake_download(self, request):
+    def fake_download(self, request, **kwargs):
         captured_urls.append(request.url)
         return DownloadResult(
             video_id=request.url.rsplit("=", 1)[-1],

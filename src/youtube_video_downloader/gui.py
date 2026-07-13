@@ -208,7 +208,14 @@ class DownloaderGUI:
 
     _URLS_HINT = "One URL per line for parallel queue"
 
-    def __init__(self, root: tk.Tk, output_dir: Path = DEFAULT_OUTPUT_DIR) -> None:
+    def __init__(
+        self,
+        root: tk.Tk,
+        output_dir: Path = DEFAULT_OUTPUT_DIR,
+        *,
+        proxy: str = "",
+        geo_unblock: bool = False,
+    ) -> None:
         _set_windows_app_id()
         self.root = root
         # Title text intentionally blank: the in-app header already shows the name,
@@ -231,6 +238,11 @@ class DownloaderGUI:
         self.embed_subtitles_var = tk.BooleanVar(value=True)
         self.expand_playlists_var = tk.BooleanVar(value=True)
         self.url_mode_var = tk.StringVar(value="single")
+        # Region-block bypass: when on and no proxy is pinned, a geo-blocked video
+        # is retried through free proxies in allowed countries. The proxy box lets
+        # the user pin their own proxy/VPN endpoint for a reliable route.
+        self.geo_unblock_var = tk.BooleanVar(value=geo_unblock)
+        self.proxy_var = tk.StringVar(value=proxy)
         self._urls_hint_active = False
 
         self._queue: Queue[tuple[str, Any]] = Queue()
@@ -666,6 +678,28 @@ class DownloaderGUI:
         ttk.Button(out_row, text="Browse", command=self._choose_output_dir).pack(
             side=tk.LEFT
         )
+
+        # Region-block bypass row: a simple toggle that routes region-blocked
+        # videos through a proxy in an allowed country, plus an optional field to
+        # pin your own proxy/VPN for reliability.
+        net_row = ttk.Frame(controls)
+        net_row.pack(fill=tk.X, pady=(10, 0))
+        ttk.Checkbutton(
+            net_row,
+            text="Bypass region block",
+            variable=self.geo_unblock_var,
+        ).pack(side=tk.LEFT)
+        ttk.Label(net_row, text="Proxy", width=7, anchor=tk.E).pack(
+            side=tk.LEFT, padx=(16, 0)
+        )
+        ttk.Entry(net_row, textvariable=self.proxy_var, width=30).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
+        ttk.Label(
+            net_row,
+            text="blank = auto  ·  or http/https/socks5://host:port",
+            style="Muted.TLabel",
+        ).pack(side=tk.LEFT, padx=(8, 0))
 
         # --- Actions ----------------------------------------------------
         actions = ttk.Frame(main)
@@ -1190,7 +1224,7 @@ class DownloaderGUI:
 
         def worker() -> None:
             try:
-                formats = self.service.list_formats(url)
+                formats = self.service.list_formats(url, proxy=self._current_proxy())
                 heights = sorted(
                     {
                         str(value)
@@ -1245,7 +1279,9 @@ class DownloaderGUI:
         expanded: list[tuple[str, str | None]] = []
         for candidate in urls:
             try:
-                playlist_name, playlist_urls = self.service.expand_playlist(candidate)
+                playlist_name, playlist_urls = self.service.expand_playlist(
+                    candidate, proxy=self._current_proxy()
+                )
             except DownloadError as exc:
                 self._append_log(f"Playlist expansion failed for {candidate}: {exc}")
                 expanded.append((candidate, None))
@@ -1299,7 +1335,14 @@ class DownloaderGUI:
             auto_subtitles=self.auto_subtitles_var.get(),
             embed_subtitles=self.embed_subtitles_var.get(),
             concurrent_fragments=concurrent_fragments,
+            proxy=self._current_proxy(),
+            geo_unblock=self.geo_unblock_var.get(),
         )
+
+    def _current_proxy(self) -> str | None:
+        """Return the pinned proxy URL, or ``None`` when the field is blank."""
+
+        return (self.proxy_var.get() or "").strip() or None
 
     def _halt_executor(self) -> None:
         """Cancel in-flight and queued jobs. .part files are preserved so a later
@@ -1377,10 +1420,19 @@ class DownloaderGUI:
     ) -> None:
         try:
             hook = self._make_progress_hook(job_id, attempt)
-            result = self.service.download(request, progress_hook=hook)
+            result = self.service.download(
+                request,
+                progress_hook=hook,
+                status_callback=lambda msg: self._queue.put(("log", msg)),
+                is_cancelled=self._stop_event.is_set,
+            )
             label = self._format_result_label(result)
             title = result.title or result.video_id
             self._queue.put(("task_done", (job_id, attempt, True, label, title)))
+        except _DownloadCancelled:
+            self._queue.put(
+                ("task_stopped", (job_id, attempt, f"Stopped: {request.url}"))
+            )
         except DownloadError as exc:
             if self._stop_event.is_set():
                 self._queue.put(
@@ -1588,7 +1640,12 @@ class DownloaderGUI:
         self.root.destroy()
 
 
-def launch_gui(output_dir: Path = DEFAULT_OUTPUT_DIR) -> None:
+def launch_gui(
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+    *,
+    proxy: str = "",
+    geo_unblock: bool = False,
+) -> None:
     root = tk.Tk()
-    DownloaderGUI(root, output_dir=output_dir)
+    DownloaderGUI(root, output_dir=output_dir, proxy=proxy, geo_unblock=geo_unblock)
     root.mainloop()

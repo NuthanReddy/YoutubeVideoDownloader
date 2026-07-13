@@ -10,12 +10,51 @@ from urllib.parse import parse_qs, urlparse
 
 import yt_dlp
 
-from ..config import DEFAULT_EXTRACTOR_RETRIES, DEFAULT_PLAYER_CLIENTS
+try:  # yt-dlp raises this to abort an in-flight download (used for pause/stop).
+    from yt_dlp.utils import DownloadCancelled
+except Exception:  # pragma: no cover - very old yt-dlp
+    class DownloadCancelled(Exception):
+        """Fallback when yt-dlp does not expose DownloadCancelled."""
+
+from ..config import (
+    DEFAULT_EXTRACTOR_RETRIES,
+    DEFAULT_PLAYER_CLIENTS,
+    MAX_AUTO_PROXY_ATTEMPTS,
+    PROXY_SOCKET_TIMEOUT,
+)
 from ..models import DownloadRequest, DownloadResult, FormatInfo
+from . import proxy_provider
 
 
 class DownloadError(RuntimeError):
     """Raised when yt-dlp cannot complete the request."""
+
+
+# Substrings that identify a YouTube uploader/geo region block. Matched
+# case-insensitively against the yt-dlp error text to decide whether the
+# "bypass region block" proxy fallback should kick in.
+_GEO_BLOCK_MARKERS = (
+    "available in your country",
+    "not available in your country",
+    "blocked it in your country",
+    "geo restricted",
+    "geo-restricted",
+    "georestrictederror",
+    "who has blocked it on copyright grounds",
+)
+
+
+def _is_geo_restricted_error(message: str) -> bool:
+    lowered = message.lower()
+    return any(marker in lowered for marker in _GEO_BLOCK_MARKERS)
+
+
+def _emit(status_callback: Callable[[str], None] | None, message: str) -> None:
+    if status_callback is not None:
+        try:
+            status_callback(message)
+        except Exception:  # pragma: no cover - logging must never break a download
+            pass
 
 
 def _ffmpeg_location() -> str | None:
@@ -56,7 +95,7 @@ def _ffmpeg_location() -> str | None:
     return None
 
 
-def _youtube_extractor_options() -> dict[str, Any]:
+def _youtube_extractor_options(proxy: str | None = None) -> dict[str, Any]:
     """Shared yt-dlp options that pick resilient YouTube player clients.
 
     We pass a list of player clients (see ``DEFAULT_PLAYER_CLIENTS``): yt-dlp
@@ -65,14 +104,21 @@ def _youtube_extractor_options() -> dict[str, Any]:
     keeping ``android`` as a fallback for networks where YouTube bot-blocks the
     web-family clients. Applied to every ``extract_info`` call so metadata
     listing, playlist expansion and downloads all use the same clients.
+
+    When ``proxy`` is provided (e.g. ``socks5://127.0.0.1:1080`` or
+    ``http://user:pass@host:port``) every request is routed through it, which is
+    the reliable way to reach videos the uploader has geo-restricted.
     """
 
-    return {
+    options: dict[str, Any] = {
         "extractor_args": {
             "youtube": {"player_client": list(DEFAULT_PLAYER_CLIENTS)}
         },
         "extractor_retries": DEFAULT_EXTRACTOR_RETRIES,
     }
+    if proxy:
+        options["proxy"] = proxy
+    return options
 
 
 class DownloadService:
@@ -88,7 +134,7 @@ class DownloadService:
             "restrictfilenames": request.restrict_filenames,
             "merge_output_format": "mp4",
             "concurrent_fragment_downloads": request.concurrent_fragments,
-            **_youtube_extractor_options(),
+            **_youtube_extractor_options(request.proxy),
         }
 
         if request.download_subtitles:
@@ -116,9 +162,53 @@ class DownloadService:
         request: DownloadRequest,
         *,
         progress_hook: Callable[[dict[str, Any]], None] | None = None,
+        status_callback: Callable[[str], None] | None = None,
+        is_cancelled: Callable[[], bool] | None = None,
     ) -> DownloadResult:
+        """Download ``request``, transparently routing around region blocks.
+
+        Normal flow: attempt the download directly (using a pinned proxy if the
+        request carries one). If that fails with a *geo-restriction* error and
+        the request opted into ``geo_unblock`` without a pinned proxy, retry the
+        same video through free proxies located in allowed countries until one
+        works. ``status_callback`` receives human-readable progress lines and
+        ``is_cancelled`` lets the caller abort the proxy hunt between attempts.
+        """
+
         request.output_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            return self._download_once(request, progress_hook=progress_hook)
+        except DownloadCancelled:
+            raise
+        except DownloadError as exc:
+            geo_blocked = _is_geo_restricted_error(str(exc))
+            can_auto = request.geo_unblock and not request.proxy and geo_blocked
+            if not can_auto:
+                raise
+            first_error = exc
+
+        return self._download_via_auto_proxy(
+            request,
+            progress_hook=progress_hook,
+            status_callback=status_callback,
+            is_cancelled=is_cancelled,
+            first_error=first_error,
+        )
+
+    def _download_once(
+        self,
+        request: DownloadRequest,
+        *,
+        proxy: str | None = None,
+        socket_timeout: int | None = None,
+        progress_hook: Callable[[dict[str, Any]], None] | None = None,
+    ) -> DownloadResult:
         options = self.build_options(request)
+        if proxy:
+            options["proxy"] = proxy
+        if socket_timeout:
+            options["socket_timeout"] = socket_timeout
         if progress_hook is not None:
             options["progress_hooks"] = [progress_hook]
 
@@ -140,15 +230,115 @@ class DownloadService:
                 )
         except DownloadError:
             raise
+        except DownloadCancelled:
+            raise
         except Exception as exc:  # pragma: no cover - library/network dependent
             raise DownloadError(str(exc)) from exc
 
-    def list_formats(self, url: str) -> list[FormatInfo]:
+    def _download_via_auto_proxy(
+        self,
+        request: DownloadRequest,
+        *,
+        progress_hook: Callable[[dict[str, Any]], None] | None,
+        status_callback: Callable[[str], None] | None,
+        is_cancelled: Callable[[], bool] | None,
+        first_error: DownloadError,
+    ) -> DownloadResult:
+        """Retry a geo-blocked video through free proxies in allowed countries."""
+
+        _emit(
+            status_callback,
+            "Region-blocked - searching for a proxy in an allowed country...",
+        )
+
+        def cancelled() -> bool:
+            return bool(is_cancelled and is_cancelled())
+
+        attempts = 0
+        last_error: DownloadError = first_error
+        tried: set[str] = set()
+
+        # A proxy that already worked (e.g. for a sibling playlist item) is very
+        # likely to work again, so try it first to avoid re-scanning every time.
+        remembered = proxy_provider.get_remembered_proxy()
+        if remembered and not cancelled():
+            tried.add(remembered)
+            attempts += 1
+            _emit(status_callback, f"Trying last working proxy ({remembered})...")
+            try:
+                result = self._download_once(
+                    request,
+                    proxy=remembered,
+                    socket_timeout=PROXY_SOCKET_TIMEOUT,
+                    progress_hook=progress_hook,
+                )
+                proxy_provider.remember_good_proxy(remembered)
+                return result
+            except DownloadCancelled:
+                raise
+            except DownloadError as exc:
+                last_error = exc
+                proxy_provider.forget_proxy(remembered)
+
+        candidates = proxy_provider.fetch_proxy_candidates()
+        if not candidates and attempts == 0:
+            raise DownloadError(
+                "Region-blocked, and no free proxy could be fetched. Connect a "
+                "VPN, or paste your own proxy (http/https/socks5) in the Proxy "
+                f"field for a reliable route. Original error: {first_error}"
+            )
+
+        probes = 0
+        for candidate in candidates:
+            if cancelled():
+                raise DownloadCancelled()
+            if attempts >= MAX_AUTO_PROXY_ATTEMPTS:
+                break
+            if candidate.url in tried:
+                continue
+            # Bound how many dead proxies we probe so the hunt can't run forever.
+            if probes >= proxy_provider.AUTO_PROXY_CANDIDATE_POOL:
+                break
+            probes += 1
+            if not proxy_provider.proxy_is_live(candidate.url):
+                continue
+
+            tried.add(candidate.url)
+            attempts += 1
+            _emit(
+                status_callback,
+                f"Trying proxy {attempts}/{MAX_AUTO_PROXY_ATTEMPTS} via "
+                f"{candidate.country} ({candidate.url})...",
+            )
+            try:
+                result = self._download_once(
+                    request,
+                    proxy=candidate.url,
+                    socket_timeout=PROXY_SOCKET_TIMEOUT,
+                    progress_hook=progress_hook,
+                )
+                proxy_provider.remember_good_proxy(candidate.url)
+                _emit(status_callback, f"Proxy via {candidate.country} succeeded.")
+                return result
+            except DownloadCancelled:
+                raise
+            except DownloadError as exc:
+                last_error = exc
+                continue
+
+        raise DownloadError(
+            f"Region-blocked; tried {attempts} proxy/proxies in allowed "
+            "countries but none worked. Free proxies are unreliable - connect a "
+            "VPN or paste your own proxy in the Proxy field for a reliable "
+            f"route. Last error: {last_error}"
+        )
+
+    def list_formats(self, url: str, *, proxy: str | None = None) -> list[FormatInfo]:
         options = {
             "quiet": True,
             "skip_download": True,
             "noplaylist": True,
-            **_youtube_extractor_options(),
+            **_youtube_extractor_options(proxy),
         }
 
         try:
@@ -161,12 +351,14 @@ class DownloadService:
         entries = [self._to_format_info(item) for item in formats]
         return sorted(entries, key=lambda item: (item.height or 0, item.format_id), reverse=True)
 
-    def list_playlist_video_urls(self, url: str) -> list[str]:
+    def list_playlist_video_urls(self, url: str, *, proxy: str | None = None) -> list[str]:
         """Return individual video URLs when the input is a playlist URL."""
 
-        return self.expand_playlist(url)[1]
+        return self.expand_playlist(url, proxy=proxy)[1]
 
-    def expand_playlist(self, url: str) -> tuple[str | None, list[str]]:
+    def expand_playlist(
+        self, url: str, *, proxy: str | None = None
+    ) -> tuple[str | None, list[str]]:
         """Return ``(playlist_title, video_urls)`` for a URL.
 
         ``playlist_title`` is the playlist's name when ``url`` resolves to a
@@ -181,7 +373,7 @@ class DownloadService:
             "skip_download": True,
             "extract_flat": True,
             "noplaylist": False,
-            **_youtube_extractor_options(),
+            **_youtube_extractor_options(proxy),
         }
 
         try:

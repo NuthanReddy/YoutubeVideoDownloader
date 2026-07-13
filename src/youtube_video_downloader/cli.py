@@ -110,6 +110,20 @@ def download(
             help="Concurrent fragment downloads per video (helps DASH/HLS streams).",
         ),
     ] = 1,
+    proxy: Annotated[
+        str | None,
+        typer.Option(
+            "--proxy",
+            help="Route downloads through a proxy, e.g. http://host:port or socks5://host:port.",
+        ),
+    ] = None,
+    geo_unblock: Annotated[
+        bool,
+        typer.Option(
+            "--geo-unblock/--no-geo-unblock",
+            help="If a video is region-blocked, retry through free proxies in allowed countries.",
+        ),
+    ] = False,
  ) -> None:
     """Download a single YouTube video."""
 
@@ -130,11 +144,13 @@ def download(
             embed_subtitles=embed_subtitles,
             restrict_filenames=restrict_filenames,
             concurrent_fragments=concurrent_fragments,
+            proxy=proxy,
+            geo_unblock=geo_unblock,
         )
         service = DownloadService()
 
         if playlist:
-            video_urls = service.list_playlist_video_urls(url)
+            video_urls = service.list_playlist_video_urls(url, proxy=proxy)
             if not video_urls:
                 raise DownloadError("No playlist videos were found.")
 
@@ -155,6 +171,8 @@ def download(
                             embed_subtitles=embed_subtitles,
                             restrict_filenames=restrict_filenames,
                             concurrent_fragments=concurrent_fragments,
+                            proxy=proxy,
+                            geo_unblock=geo_unblock,
                         ),
                     ): video_url
                     for video_url in video_urls
@@ -188,7 +206,10 @@ def download(
             )
             return
 
-        result = service.download(request)
+        result = service.download(
+            request,
+            status_callback=lambda message: typer.echo(message),
+        )
     except (ResolutionParseError, SubtitleLanguageError, ValueError) as exc:
         typer.secho(f"Configuration error: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
@@ -210,11 +231,18 @@ def download(
 @app.command("formats")
 def formats(
     url: Annotated[str, typer.Argument(help="The YouTube video URL to inspect.")],
+    proxy: Annotated[
+        str | None,
+        typer.Option(
+            "--proxy",
+            help="Route the metadata request through a proxy, e.g. socks5://host:port.",
+        ),
+    ] = None,
 ) -> None:
     """List the formats that yt-dlp reports for a YouTube video."""
 
     try:
-        format_entries = DownloadService().list_formats(url)
+        format_entries = DownloadService().list_formats(url, proxy=proxy)
     except DownloadError as exc:
         typer.secho(f"Could not fetch formats: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
@@ -243,13 +271,27 @@ def gui(
             help="Directory where downloaded files will be stored and managed.",
         ),
     ] = DEFAULT_OUTPUT_DIR,
+    proxy: Annotated[
+        str | None,
+        typer.Option(
+            "--proxy",
+            help="Prefill the GUI proxy field, e.g. http://host:port or socks5://host:port.",
+        ),
+    ] = None,
+    geo_unblock: Annotated[
+        bool,
+        typer.Option(
+            "--geo-unblock/--no-geo-unblock",
+            help="Prefill the GUI 'Bypass region block' toggle as enabled.",
+        ),
+    ] = False,
 ) -> None:
     """Launch the desktop GUI."""
 
     # Import lazily so environments without Tk still allow CLI-only usage.
     from .gui import launch_gui
 
-    launch_gui(output_dir=output_dir)
+    launch_gui(output_dir=output_dir, proxy=proxy or "", geo_unblock=geo_unblock)
 
 
 def main() -> None:

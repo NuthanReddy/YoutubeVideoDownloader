@@ -34,3 +34,38 @@ APP_NAME = "youtube-video-downloader"
 DEFAULT_PLAYER_CLIENTS = ("default", "android")
 # Extra extraction attempts before giving up (helps ride out transient 429s).
 DEFAULT_EXTRACTOR_RETRIES = 3
+
+# --- "Bypass region block" (geo-unblock) settings ---------------------------
+# Some videos are geo-restricted by the uploader ("not made available in your
+# country"). YouTube enforces this by the real connecting IP and ignores the
+# X-Forwarded-For header, so yt-dlp's built-in --geo-bypass does NOT help; the
+# only reliable workaround is to route the request through a proxy that exits in
+# an allowed country. When the toggle is on and no user proxy is pinned, the app
+# fetches free public proxies and retries the blocked video through them.
+#
+# Free public proxy list (proxyscrape v4, JSON). Fetched on demand, best effort.
+FREE_PROXY_API_URL = (
+    "https://api.proxyscrape.com/v4/free-proxy-list/get"
+    "?request=display_proxies&proxy_format=protocolipport&format=json"
+    "&protocol=http&timeout=8000"
+)
+# Countries commonly present in "available" lists with a healthy supply of free
+# proxies. These are tried first; other allowed countries are still used as
+# fallbacks. (The retry loop self-corrects if a chosen country is also blocked.)
+PREFERRED_PROXY_COUNTRIES = (
+    "US", "GB", "DE", "NL", "FR", "CA", "JP", "SG", "AU", "BR", "SE", "ES",
+    "IT", "PL", "FI", "CH", "IE", "NO", "DK",
+)
+# Max proxies to actually attempt a download through before giving up.
+MAX_AUTO_PROXY_ATTEMPTS = 8
+# Number of ranked candidates to pull from the list before liveness-filtering.
+AUTO_PROXY_CANDIDATE_POOL = 40
+# Per-attempt socket timeout (seconds) when downloading through a free proxy;
+# free proxies are slow/flaky, so keep it short so dead ones fail fast.
+PROXY_SOCKET_TIMEOUT = 20
+# Quick liveness pre-check timeout (seconds) used to weed out dead proxies
+# before paying for a full yt-dlp attempt.
+PROXY_LIVENESS_TIMEOUT = 6
+# How long a fetched proxy list stays cached (seconds) so a queue of videos
+# reuses one fetch instead of hammering the API per item.
+PROXY_CACHE_TTL = 600

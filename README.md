@@ -16,6 +16,7 @@ and a local library manager.
 - Per-video concurrent fragment downloads for DASH/HLS streams
 - Resilient extraction that defers to yt-dlp's maintained **default player clients** so the full HD/4K format ladder stays available (see [Troubleshooting](#troubleshooting))
 - **`ffmpeg` bundled** in the packaged desktop apps, so HD merges and subtitle embedding work with no separate install
+- **Region-block bypass** — an optional toggle that, when a video is blocked in your country, automatically retries through a free proxy in an allowed country (or your own pinned proxy/VPN endpoint) — see [Region-restricted videos](#region-restricted-videos-uploader-country-blocks)
 
 **Desktop GUI**
 
@@ -27,6 +28,7 @@ and a local library manager.
 - Resizable side-by-side **Active Downloads** and **Downloaded Videos** panes, with a collapsible **Activity** log docked at the bottom
 - Browse nested playlist folders in the library, open a file/folder (single- or double-click), reveal the downloads root, and delete downloaded items
 - Modern dark theme with a matching app icon and Windows taskbar integration
+- **Bypass region block** toggle plus an optional **Proxy** field for routing geo-restricted downloads through an allowed country
 
 ## Requirements
 
@@ -131,6 +133,8 @@ Run with the local interpreter directly (equivalent to `uv run`):
 | `--playlist / --single` | single | Treat the URL as a playlist and download all videos |
 | `--playlist-workers` | `3` | Parallel workers for playlist downloads |
 | `--concurrent-fragments` | `1` | Concurrent fragment downloads per video |
+| `--proxy` | none | Route downloads through a proxy, e.g. `http://host:port` or `socks5://host:port` |
+| `--geo-unblock / --no-geo-unblock` | off | If a video is region-blocked, retry through free proxies in allowed countries |
 | `--restrict-filenames / --allow-unicode-filenames` | unicode | Use ASCII-safe filenames |
 
 ## Output structure
@@ -170,6 +174,9 @@ A few defaults live in `src/youtube_video_downloader/config.py`:
 - `DEFAULT_EXTRACTOR_RETRIES` — extra extraction attempts to ride out transient errors.
 - `DEFAULT_FILENAME_TEMPLATE` / `PLAYLIST_ITEM_FILENAME_TEMPLATE` — output naming.
 - `DEFAULT_SUBTITLE_LANGUAGES` / `DEFAULT_SUBTITLE_FORMAT` — subtitle defaults.
+- Region-block bypass tunables — `FREE_PROXY_API_URL`, `PREFERRED_PROXY_COUNTRIES`,
+  `MAX_AUTO_PROXY_ATTEMPTS`, `AUTO_PROXY_CANDIDATE_POOL`, and the proxy timeouts
+  control the free-proxy auto mode (see [Region-restricted videos](#region-restricted-videos-uploader-country-blocks)).
 
 ## Troubleshooting
 
@@ -217,6 +224,34 @@ source, install `ffmpeg` and ensure it is on your `PATH`.
 
 Make sure you ran `uv sync --dev` and are launching with the project's `.venv`
 interpreter. `tkinter` ships with standard CPython on Windows and macOS.
+
+### Region-restricted videos (uploader country blocks)
+
+Some uploads are restricted to a set of countries — yt-dlp reports:
+
+```
+ERROR: [youtube] <id>: The uploader has not made this video available in your country
+```
+
+YouTube decides your region from the **IP address that connects to it**, so
+yt-dlp's built-in `--geo-bypass` (an `X-Forwarded-For` header) does **not** work
+for these blocks. The only reliable fix is to route the request through a proxy
+or VPN that *exits* in an allowed country. This app gives you two ways to do that:
+
+- **Bypass region block toggle** (GUI) / **`--geo-unblock`** (CLI) — leave the
+  proxy field blank and, only when a download actually fails with a region-block
+  error, the app fetches a list of free public proxies in allowed countries,
+  liveness-checks them, and retries the download through a working one. A proxy
+  that succeeds is remembered and reused for sibling playlist items. Normal
+  (non-blocked) downloads are never slowed down by this.
+- **Proxy field** (GUI) / **`--proxy`** (CLI) — pin your own proxy or VPN
+  endpoint, e.g. `http://host:port`, `https://host:port`, or
+  `socks5://host:port`. A pinned proxy is used for *every* request, so it's the
+  reliable path.
+
+> **Note:** Free public proxies are slow, flaky, and short-lived, so auto mode is
+> best-effort — it may take several tries or fail entirely. For dependable
+> geo-unblocking, connect a VPN or paste a proxy you trust into the Proxy field.
 
 ## Testing
 
