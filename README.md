@@ -256,12 +256,15 @@ or VPN that *exits* in an allowed country. This app gives you two ways to do tha
 **`[WinError 448] ... untrusted mount point` when a download starts**
 
 This only happens when the app is launched from inside a sandboxed runtime that
-redirects `sys.path`, the working directory, or the executable folder through an
-untrusted junction/reparse point (Windows' *RedirectionTrust* mitigation). yt-dlp
-scans those locations for optional plugins on startup and the traversal is
-blocked. The app now disables yt-dlp's plugin discovery entirely
-(`YTDLP_NO_PLUGINS`), so this no longer occurs — update to the latest build. The
-normal double-click install is unaffected.
+puts an *untrusted* junction/reparse point on `PATH` (for example a
+`...\agency\CurrentVersion` directory) while Windows' *RedirectionTrust*
+mitigation is enforced. To locate its JS runtime (Deno), yt-dlp runs
+`os.path.realpath` over every `PATH` entry — and `realpath` (unlike
+`os.path.exists`) does **not** swallow the resulting `OSError`, so the traversal
+of that one untrusted entry raised `[WinError 448]` and aborted every extraction.
+The app now scrubs any un-traversable entries from `PATH` at startup (and steps
+out of an un-traversable working directory), so this no longer occurs — update to
+the latest build. A normal double-click / installer launch was never affected.
 
 ## Testing
 

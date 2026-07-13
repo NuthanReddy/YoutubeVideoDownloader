@@ -423,3 +423,41 @@ def test_ytdlp_plugin_discovery_is_disabled(monkeypatch):
     spec = next(iter(pl.plugin_specs.value.values()))
 
     assert pl.load_plugins(spec) == {}
+
+
+def test_harden_runtime_paths_drops_untraversable_entries(monkeypatch):
+    """PATH entries that fault on ``realpath`` must be scrubbed on Windows.
+
+    yt-dlp locates its JS runtime (Deno) by mapping ``os.path.realpath`` over
+    every ``PATH`` entry. ``realpath`` -- unlike ``os.path.exists`` -- does not
+    swallow ``OSError``, so an *untrusted* junction on ``PATH`` (e.g. the
+    ``...\\agency\\CurrentVersion`` directory some sandboxes inject, under the
+    Windows RedirectionTrust mitigation) raises ``[WinError 448]`` and aborts
+    every extraction. ``_harden_runtime_paths`` drops the faulting entries.
+    """
+
+    import os
+
+    if os.name != "nt":
+        pytest.skip("PATH hardening only runs on Windows")
+
+    bad = r"C:\Users\x\AppData\Roaming\agency\CurrentVersion"
+    good_first = r"C:\Windows\System32"
+    good_last = r"C:\Tools\bin"
+    monkeypatch.setenv("PATH", os.pathsep.join([good_first, bad, good_last]))
+
+    real_realpath = os.path.realpath
+
+    def fake_realpath(path, *args, **kwargs):
+        if path == bad:
+            raise OSError(448, "untrusted mount point")
+        return real_realpath(path, *args, **kwargs)
+
+    monkeypatch.setattr(os.path, "realpath", fake_realpath)
+
+    downloader_module._harden_runtime_paths()
+
+    entries = os.environ["PATH"].split(os.pathsep)
+    assert bad not in entries
+    assert good_first in entries
+    assert good_last in entries

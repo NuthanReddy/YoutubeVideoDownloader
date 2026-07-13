@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
@@ -28,12 +29,13 @@ from . import proxy_provider
 # --- Disable yt-dlp's optional plugin discovery -----------------------------
 # The first time a YoutubeDL is constructed, yt-dlp scans sys.path, the current
 # working directory and the executable directory for an optional
-# ``yt_dlp_plugins`` namespace package. If the app is launched from a sandbox
-# that redirects any of those locations through an *untrusted* junction / reparse
-# point (e.g. under Windows' "RedirectionTrust" process mitigation), that scan
-# raises ``OSError: [WinError 448] ... untrusted mount point`` and the download
-# aborts before it even starts. This app neither ships nor supports plugins, so
-# we turn the scan off for a self-contained, predictable runtime.
+# ``yt_dlp_plugins`` namespace package. This app neither ships nor supports
+# plugins, so we turn the scan off for a self-contained, predictable runtime --
+# it avoids touching arbitrary filesystem locations during startup and is a
+# small robustness / security win. (Note: this is *not* the fix for the
+# ``[WinError 448] untrusted mount point`` crash -- that comes from the JS-runtime
+# PATH lookup handled by ``_harden_runtime_paths`` below -- but keeping plugin
+# discovery off removes one more filesystem scan from the hot path.)
 # ``YTDLP_NO_PLUGINS`` is honoured at the very top of yt-dlp's ``load_plugins``
 # and short-circuits every scan; setting it here (before any YoutubeDL is built)
 # is sufficient. We also clear the plugin dirs directly as a version-proof backup
@@ -45,6 +47,58 @@ try:  # pragma: no cover - internal yt-dlp API, guarded against version drift
     _ytdlp_plugin_dirs.value = []
 except Exception:  # pragma: no cover - older/newer yt-dlp without this global
     pass
+
+
+# --- Harden runtime path lookup against untrusted junctions -----------------
+# yt-dlp locates its JS runtime (Deno, needed for YouTube's ``n``-signature on
+# every extraction) via ``utils/_jsruntime._find_exe``, which maps
+# ``os.path.realpath`` over the current working directory and *every* ``PATH``
+# entry. Unlike ``os.path.exists``, ``os.path.realpath`` does not swallow
+# ``OSError`` -- so if any of those locations is an *untrusted* junction / reparse
+# point (e.g. the ``...\\agency\\CurrentVersion`` directory some sandboxes place
+# on ``PATH``) and the process runs under Windows' *RedirectionTrust* mitigation,
+# the realpath raises ``OSError: [WinError 448] ... untrusted mount point`` and
+# the exception propagates out of extraction, aborting the download before it
+# starts. We cannot traverse those entries anyway, so drop the ones that fault
+# from ``PATH`` (and step out of an untraversable cwd). This is a no-op on normal
+# launches where every location resolves cleanly.
+def _harden_runtime_paths() -> None:
+    if os.name != "nt":
+        return
+
+    raw = os.environ.get("PATH")
+    if raw:
+        separator = os.pathsep
+        kept: list[str] = []
+        dropped = False
+        for entry in raw.split(separator):
+            if not entry:
+                continue
+            try:
+                os.path.realpath(entry)
+            except OSError:
+                dropped = True
+                continue
+            kept.append(entry)
+        if dropped:
+            os.environ["PATH"] = separator.join(kept)
+
+    # If the working directory itself sits behind an untrusted junction, the same
+    # realpath fault occurs; relocate to a directory we can traverse.
+    try:
+        cwd = os.getcwd()
+        os.path.realpath(cwd)
+    except OSError:
+        for candidate in (os.environ.get("USERPROFILE"), tempfile.gettempdir()):
+            if candidate and os.path.isdir(candidate):
+                try:
+                    os.chdir(candidate)
+                except OSError:
+                    continue
+                break
+
+
+_harden_runtime_paths()
 
 
 class DownloadError(RuntimeError):
