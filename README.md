@@ -253,6 +253,16 @@ or VPN that *exits* in an allowed country. This app gives you two ways to do tha
 > best-effort — it may take several tries or fail entirely. For dependable
 > geo-unblocking, connect a VPN or paste a proxy you trust into the Proxy field.
 
+**`[WinError 448] ... untrusted mount point` when a download starts**
+
+This only happens when the app is launched from inside a sandboxed runtime that
+redirects `sys.path`, the working directory, or the executable folder through an
+untrusted junction/reparse point (Windows' *RedirectionTrust* mitigation). yt-dlp
+scans those locations for optional plugins on startup and the traversal is
+blocked. The app now disables yt-dlp's plugin discovery entirely
+(`YTDLP_NO_PLUGINS`), so this no longer occurs — update to the latest build. The
+normal double-click install is unaffected.
+
 ## Testing
 
 ```powershell

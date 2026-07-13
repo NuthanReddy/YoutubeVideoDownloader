@@ -25,6 +25,27 @@ from ..config import (
 from ..models import DownloadRequest, DownloadResult, FormatInfo
 from . import proxy_provider
 
+# --- Disable yt-dlp's optional plugin discovery -----------------------------
+# The first time a YoutubeDL is constructed, yt-dlp scans sys.path, the current
+# working directory and the executable directory for an optional
+# ``yt_dlp_plugins`` namespace package. If the app is launched from a sandbox
+# that redirects any of those locations through an *untrusted* junction / reparse
+# point (e.g. under Windows' "RedirectionTrust" process mitigation), that scan
+# raises ``OSError: [WinError 448] ... untrusted mount point`` and the download
+# aborts before it even starts. This app neither ships nor supports plugins, so
+# we turn the scan off for a self-contained, predictable runtime.
+# ``YTDLP_NO_PLUGINS`` is honoured at the very top of yt-dlp's ``load_plugins``
+# and short-circuits every scan; setting it here (before any YoutubeDL is built)
+# is sufficient. We also clear the plugin dirs directly as a version-proof backup
+# so plugins stay disabled even if the environment variable is somehow cleared.
+os.environ.setdefault("YTDLP_NO_PLUGINS", "1")
+try:  # pragma: no cover - internal yt-dlp API, guarded against version drift
+    from yt_dlp.globals import plugin_dirs as _ytdlp_plugin_dirs
+
+    _ytdlp_plugin_dirs.value = []
+except Exception:  # pragma: no cover - older/newer yt-dlp without this global
+    pass
+
 
 class DownloadError(RuntimeError):
     """Raised when yt-dlp cannot complete the request."""

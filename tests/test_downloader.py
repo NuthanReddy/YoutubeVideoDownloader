@@ -396,3 +396,30 @@ def test_pinned_proxy_skips_auto_hunt(tmp_path, monkeypatch):
     # immediately without ever fetching free proxy candidates.
     assert result.video_id == "abc123"
     assert _GeoBlockingYoutubeDL.proxies_seen == ["http://9.9.9.9:3128"]
+
+
+def test_ytdlp_plugin_discovery_is_disabled(monkeypatch):
+    """Importing the downloader must switch off yt-dlp's plugin scan.
+
+    yt-dlp otherwise walks sys.path / CWD / the executable dir looking for a
+    ``yt_dlp_plugins`` package. When one of those locations is redirected through
+    an untrusted junction (Windows RedirectionTrust mitigation), the scan raises
+    ``OSError [WinError 448]`` and aborts the download. With the scan disabled,
+    ``load_plugins`` returns early and never touches the filesystem.
+    """
+
+    import yt_dlp.plugins as pl
+
+    # The downloader import (already loaded above) sets this guard.
+    assert downloader_module.os.environ.get("YTDLP_NO_PLUGINS")
+
+    def _explode(*_args, **_kwargs):  # pragma: no cover - must never run
+        raise OSError(
+            448, "The path cannot be traversed ... untrusted mount point"
+        )
+
+    # If the guard failed, load_plugins would reach the scanner and blow up.
+    monkeypatch.setattr(pl, "iter_modules", _explode)
+    spec = next(iter(pl.plugin_specs.value.values()))
+
+    assert pl.load_plugins(spec) == {}
